@@ -137,14 +137,16 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         let quad: [Float] = [-1, -1, 1, -1, -1, 1, 1, 1]
         quadBuf = device.makeBuffer(bytes: quad, length: quad.count * 4)
 
-        // UV identiques a l'original Android. Correct avec la methode
-        // d'upload manuelle de texture() (voir plus bas) : ligne 0 du
-        // buffer = haut de l'image = UV.v=0, convention Metal native.
+        // V inverse par rapport a l'original Android : meme avec l'upload
+        // manuel deterministe (voir texture() plus bas), le menu restait
+        // inverse avec le mapping ci-dessus - donc Metal.replace() traite
+        // la ligne 0 du buffer comme le BAS de la texture, pas le haut.
+        // On inverse ici pour compenser.
         let plan: [Float] = [
-            -0.5, -0.5, 0, 0, 1,
-             0.5, -0.5, 0, 1, 1,
-            -0.5,  0.5, 0, 0, 0,
-             0.5,  0.5, 0, 1, 0,
+            -0.5, -0.5, 0, 0, 0,
+             0.5, -0.5, 0, 1, 0,
+            -0.5,  0.5, 0, 0, 1,
+             0.5,  0.5, 0, 1, 1,
         ]
         planBuf = device.makeBuffer(bytes: plan, length: plan.count * 4)
     }
