@@ -6,19 +6,26 @@ on:
 
 jobs:
   ipa:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
       - name: Installer XcodeGen
         run: brew install xcodegen
 
+      - name: Selectionner la derniere version d'Xcode disponible
+        run: |
+          LATEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          echo "Xcode retenu : $LATEST"
+          sudo xcode-select -s "$LATEST/Contents/Developer"
+          xcodebuild -version
+
       - name: Generer le projet Xcode
         run: xcodegen generate
 
       - name: Compiler (sans signature)
         run: |
-          set -o pipefail
+          set +e
           xcodebuild \
             -project App2-iOS.xcodeproj \
             -scheme App2VR \
@@ -29,6 +36,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             build 2>&1 | tee build.log
           code=${PIPESTATUS[0]}
+          set -e
           if [ "$code" -ne 0 ]; then
             echo ""
             echo "################################################"
