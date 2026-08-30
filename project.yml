@@ -12,6 +12,8 @@ targets:
     info:
       path: Sources/Info.plist
       properties:
+        CFBundleDisplayName: Kyoh Productions
+        CFBundleName: Kyoh Productions
         UILaunchScreen: {}
         UIRequiresFullScreen: true
         UISupportedInterfaceOrientations:
