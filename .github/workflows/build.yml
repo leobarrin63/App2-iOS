@@ -1,0 +1,63 @@
+name: Construire l'IPA (non signe)
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  ipa:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer XcodeGen
+        run: brew install xcodegen
+
+      - name: Generer le projet Xcode
+        run: xcodegen generate
+
+      - name: Compiler (sans signature)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project App2-iOS.xcodeproj \
+            -scheme App2VR \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build 2>&1 | tee build.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            echo ""
+            echo "################################################"
+            echo "#   ERREURS DE COMPILATION  -  a photographier #"
+            echo "################################################"
+            grep -E "error:" build.log | head -40
+            echo "################################################"
+            exit "$code"
+          fi
+
+      - name: Empaqueter en .ipa non signe
+        run: |
+          APP_PATH="build/Build/Products/Release-iphoneos/App2VR.app"
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          zip -r App2VR-unsigned.ipa Payload
+          echo "IPA prete : App2VR-unsigned.ipa (a signer avec Sideloadly avant d'installer sur un iPhone)"
+
+      - name: Recuperer l'IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: app2vr-ipa-non-signe
+          path: App2VR-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Journal complet en cas d'echec
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: journal-compilation
+          path: build.log
+          if-no-files-found: ignore
