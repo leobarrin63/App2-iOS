@@ -41,15 +41,12 @@ final class HeadTracker {
     private func traiter(_ motion: CMDeviceMotion) {
         let q = motion.attitude.quaternion
         // repere capteur (Z-up, X/Y horizontaux) -> repere Metal (Y-up, -Z devant)
-        // bascule=-90 et paysage=+90 confirmes : le haut/bas est maintenant
-        // correct, on n'y touche plus. Reste le lacet (gauche/droite)
-        // invers - contrairement au dernier essai rate sur l'axe pitch
-        // (inverser q.x avait couple les axes entre eux), on tente ici
-        // d'inverser q.z, qui correspond au lacet dans le repere Z-up
-        // d'origine du capteur, AVANT bascule/paysage. A verifier
-        // isolement : si le haut/bas se remet a deconner, ce n'est pas le
-        // bon levier non plus.
-        let qCapteur = simd_quatf(real: Float(q.w), imag: SIMD3<Float>(Float(q.x), Float(q.y), -Float(q.z)))
+        // bascule=-90 et paysage=+90 confirmes : le haut/bas est correct
+        // avec ce reglage. La tentative d'inverser q.z pour le lacet a ete
+        // annulee (probablement recasse le haut/bas) - retour au
+        // quaternion capteur non modifie. Le lacet gauche/droite reste
+        // invers pour l'instant, a traiter separement.
+        let qCapteur = simd_quatf(real: Float(q.w), imag: SIMD3<Float>(Float(q.x), Float(q.y), Float(q.z)))
         let bascule = simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(1, 0, 0))
         let paysage = simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(0, 0, 1))
         let qFinal = (bascule * qCapteur * paysage).normalized
