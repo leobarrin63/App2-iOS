@@ -139,15 +139,13 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         let quad: [Float] = [-1, -1, 1, -1, -1, 1, 1, 1]
         quadBuf = device.makeBuffer(bytes: quad, length: quad.count * 4)
 
-        // UV identiques a l'original Android : le premier essai (inverser
-        // le V ici) n'a pas suffi, donc c'est bien l'option d'origine du
-        // MTKTextureLoader qui pose probleme, pas ce mapping - voir
-        // dessinerCurseur()/panel texture loading plus bas.
+        // V inverse par rapport a l'original Android (menu/curseur retournes
+        // avec le mapping d'origine sur iOS).
         let plan: [Float] = [
-            -0.5, -0.5, 0, 0, 1,
-             0.5, -0.5, 0, 1, 1,
-            -0.5,  0.5, 0, 0, 0,
-             0.5,  0.5, 0, 1, 0,
+            -0.5, -0.5, 0, 0, 0,
+             0.5, -0.5, 0, 1, 0,
+            -0.5,  0.5, 0, 0, 1,
+             0.5,  0.5, 0, 1, 1,
         ]
         planBuf = device.makeBuffer(bytes: plan, length: plan.count * 4)
     }
@@ -234,7 +232,7 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         viser(dt: dt)
 
         if panel.dirty, let img = panel.image {
-            texPanel = try? loader.newTexture(cgImage: img, options: [.origin: MTKTextureLoader.Origin.bottomLeft, .SRGB: false])
+            texPanel = try? loader.newTexture(cgImage: img, options: [.origin: MTKTextureLoader.Origin.topLeft, .SRGB: false])
             panel.dirty = false
         }
         texCur = dessinerCurseur()
@@ -387,7 +385,7 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             ctx.fillEllipse(in: CGRect(x: 59, y: 59, width: 10, height: 10))
         }
         guard let cg = img.cgImage else { return nil }
-        return try? loader.newTexture(cgImage: cg, options: [.origin: MTKTextureLoader.Origin.bottomLeft, .SRGB: false])
+        return try? loader.newTexture(cgImage: cg, options: [.origin: MTKTextureLoader.Origin.topLeft, .SRGB: false])
     }
 
     // ---------- visee (curseur base sur le regard) ----------

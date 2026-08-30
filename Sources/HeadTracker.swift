@@ -41,11 +41,14 @@ final class HeadTracker {
     private func traiter(_ motion: CMDeviceMotion) {
         let q = motion.attitude.quaternion
         // repere capteur (Z-up, X/Y horizontaux) -> repere Metal (Y-up, -Z devant)
-        // rotation fixe de -90 deg autour de X, + reorientation pour le mode paysage.
-        // x inversé : corrige l'axe haut/bas rapporte inverse par rapport
-        // au rendu (confirme par test sur appareil reel).
-        let qCapteur = simd_quatf(real: Float(q.w), imag: SIMD3<Float>(-Float(q.x), Float(q.y), Float(q.z)))
-        let bascule = simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(1, 0, 0))
+        // rotation fixe de +90 deg autour de X (inversee par rapport au
+        // premier essai a -90 : inverser le composant x du quaternion du
+        // capteur directement causait un couplage indesirable entre les
+        // axes - "tourne au lieu d'aller a droite". Inverser plutot le
+        // signe de cette rotation fixe reste une rotation propre, donc pas
+        // de couplage, juste le haut/bas qui s'inverse.
+        let qCapteur = simd_quatf(real: Float(q.w), imag: SIMD3<Float>(Float(q.x), Float(q.y), Float(q.z)))
+        let bascule = simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(1, 0, 0))
         let paysage = simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(0, 0, 1))
         let qFinal = (bascule * qCapteur * paysage).normalized
 
