@@ -47,7 +47,6 @@ final class VRRenderer: NSObject, MTKViewDelegate {
     private let panel = Panel()
     private let tete = HeadTracker()
     private var video: VideoBridge!
-    private let loader: MTKTextureLoader
 
     private let s = AppState.shared
     private let bus = VideoBus.shared
@@ -72,7 +71,6 @@ final class VRRenderer: NSObject, MTKViewDelegate {
     override init() {
         device = MTLCreateSystemDefaultDevice()!
         queue = device.makeCommandQueue()!
-        loader = MTKTextureLoader(device: device)
 
         let sd = MTLSamplerDescriptor()
         sd.minFilter = .linear; sd.magFilter = .linear
@@ -139,12 +137,9 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         let quad: [Float] = [-1, -1, 1, -1, -1, 1, 1, 1]
         quadBuf = device.makeBuffer(bytes: quad, length: quad.count * 4)
 
-        // UV identiques a l'original Android : les deux variantes de ce
-        // mapping ont deja ete testees sans effet visible (voir historique
-        // git) - c'est bien l'option d'origine du chargeur de texture qui
-        // controle ce flip, pas ce mapping. Cf. MTKTextureLoader.Origin
-        // plus bas, passe a .bottomLeft cette fois (jamais teste seul avec
-        // un suivi de tete qui fonctionne correctement).
+        // UV identiques a l'original Android. Correct avec la methode
+        // d'upload manuelle de texture() (voir plus bas) : ligne 0 du
+        // buffer = haut de l'image = UV.v=0, convention Metal native.
         let plan: [Float] = [
             -0.5, -0.5, 0, 0, 1,
              0.5, -0.5, 0, 1, 1,
@@ -236,7 +231,7 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         viser(dt: dt)
 
         if panel.dirty, let img = panel.image {
-            texPanel = try? loader.newTexture(cgImage: img, options: [.origin: MTKTextureLoader.Origin.bottomLeft, .SRGB: false])
+            texPanel = texture(from: img)
             panel.dirty = false
         }
         texCur = dessinerCurseur()
@@ -389,7 +384,35 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             ctx.fillEllipse(in: CGRect(x: 59, y: 59, width: 10, height: 10))
         }
         guard let cg = img.cgImage else { return nil }
-        return try? loader.newTexture(cgImage: cg, options: [.origin: MTKTextureLoader.Origin.bottomLeft, .SRGB: false])
+        return texture(from: cg)
+    }
+
+    /* Upload manuel, deterministe, sans passer par MTKTextureLoader dont
+       l'option d'origine n'a pas donne de resultat fiable (plusieurs
+       combinaisons testees sans effet observable). Le contexte est
+       explicitement retourne (translate+scale) pour que la ligne 0 du
+       buffer corresponde au HAUT de l'image, ce qui correspond
+       directement a la convention native Metal (UV (0,0) = coin haut-
+       gauche de la texture). */
+    private func texture(from cgImage: CGImage) -> MTLTexture? {
+        let w = cgImage.width, h = cgImage.height
+        guard w > 0, h > 0 else { return nil }
+        let bytesPerRow = w * 4
+        guard let ctx = CGContext(
+            data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        ctx.translateBy(x: 0, y: CGFloat(h))
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let data = ctx.data else { return nil }
+
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
+        desc.usage = [.shaderRead]
+        guard let tex = device.makeTexture(descriptor: desc) else { return nil }
+        tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: data, bytesPerRow: bytesPerRow)
+        return tex
     }
 
     // ---------- visee (curseur base sur le regard) ----------
