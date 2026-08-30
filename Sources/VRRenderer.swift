@@ -137,16 +137,14 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         let quad: [Float] = [-1, -1, 1, -1, -1, 1, 1, 1]
         quadBuf = device.makeBuffer(bytes: quad, length: quad.count * 4)
 
-        // V inverse par rapport a l'original Android : meme avec l'upload
-        // manuel deterministe (voir texture() plus bas), le menu restait
-        // inverse avec le mapping ci-dessus - donc Metal.replace() traite
-        // la ligne 0 du buffer comme le BAS de la texture, pas le haut.
-        // On inverse ici pour compenser.
+        // V invers (voir plus haut, deja corrige - le haut/bas du menu est
+        // maintenant bon). U invers ici en plus : le menu apparaissait en
+        // miroir gauche/droite (texte a l'envers comme dans un miroir).
         let plan: [Float] = [
-            -0.5, -0.5, 0, 0, 0,
-             0.5, -0.5, 0, 1, 0,
-            -0.5,  0.5, 0, 0, 1,
-             0.5,  0.5, 0, 1, 1,
+            -0.5, -0.5, 0, 1, 0,
+             0.5, -0.5, 0, 0, 0,
+            -0.5,  0.5, 0, 1, 1,
+             0.5,  0.5, 0, 0, 1,
         ]
         planBuf = device.makeBuffer(bytes: plan, length: plan.count * 4)
     }
