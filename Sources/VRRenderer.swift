@@ -204,6 +204,20 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         let ww = ow * Q.w - oy * Q.y
         M = matFromQ(x, y, z, ww)
 
+        // Correction ciblee du lacet (gauche/droite) uniquement : une
+        // rotation supplementaire autour de Y ne touche jamais la
+        // composante Y des colonnes de M (verifie par calcul), donc le
+        // tangage et le roulis restent strictement inchanges. On applique
+        // -2*lacet pour inverser son signe sans rien recomposer d'autre.
+        let yawBrut = atan2(M.columns.2.x, M.columns.2.z)
+        let cy = cos(-2 * yawBrut), sy = sin(-2 * yawBrut)
+        let correctionLacet = matrix_float3x3(columns: (
+            SIMD3(cy, 0, -sy),
+            SIMD3(0, 1, 0),
+            SIMD3(sy, 0, cy)
+        ))
+        M = correctionLacet * M
+
         let yaw = atan2(M.columns.2.x, M.columns.2.z)
         s.dbgYaw = yaw
         s.dbgPitch = asin(min(max(M.columns.2.y * -1, -1), 1))
