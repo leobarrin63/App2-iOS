@@ -41,14 +41,15 @@ final class HeadTracker {
     private func traiter(_ motion: CMDeviceMotion) {
         let q = motion.attitude.quaternion
         // repere capteur (Z-up, X/Y horizontaux) -> repere Metal (Y-up, -Z devant)
-        // Retour a -90 : le +90 precedent avait ete teste alors que l'app
-        // acceptait encore les deux orientations paysage (gauche/droite),
-        // ce qui faussait le test. Verrouille maintenant sur LandscapeRight
-        // uniquement (project.yml) - avec un seul sens de reference fixe,
-        // -90 est le signe qui corrige l'axe haut/bas signale invers.
+        // "bascule" (Z-up -> Y-up) verifie par calcul direct : Rx(-90) sur
+        // (0,0,1) donne bien (0,1,0), donc -90 est correct pour cette
+        // partie-la, on n'y touche plus. C'est "paysage" (compensation de
+        // la tenue a l'horizontale) qui n'avait jamais ete change jusqu'ici
+        // et qui est le suspect restant pour l'axe haut/bas encore invers -
+        // on inverse son signe a la place.
         let qCapteur = simd_quatf(real: Float(q.w), imag: SIMD3<Float>(Float(q.x), Float(q.y), Float(q.z)))
         let bascule = simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(1, 0, 0))
-        let paysage = simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(0, 0, 1))
+        let paysage = simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(0, 0, 1))
         let qFinal = (bascule * qCapteur * paysage).normalized
 
         state.qtX = qFinal.imag.x
