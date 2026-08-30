@@ -139,11 +139,15 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         let quad: [Float] = [-1, -1, 1, -1, -1, 1, 1, 1]
         quadBuf = device.makeBuffer(bytes: quad, length: quad.count * 4)
 
+        // V inverse par rapport a l'original Android : MTKTextureLoader
+        // charge les CGImage avec une origine haut-gauche differente de
+        // ce qu'attendait le Canvas Android. A ajuster de nouveau si
+        // l'image reapparait a l'envers apres ce correctif.
         let plan: [Float] = [
-            -0.5, -0.5, 0, 0, 1,
-             0.5, -0.5, 0, 1, 1,
-            -0.5,  0.5, 0, 0, 0,
-             0.5,  0.5, 0, 1, 0,
+            -0.5, -0.5, 0, 0, 0,
+             0.5, -0.5, 0, 1, 0,
+            -0.5,  0.5, 0, 0, 1,
+             0.5,  0.5, 0, 1, 1,
         ]
         planBuf = device.makeBuffer(bytes: plan, length: plan.count * 4)
     }
