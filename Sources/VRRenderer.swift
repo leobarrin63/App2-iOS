@@ -409,8 +409,8 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         ctx.strokeEllipse(in: CGRect(x: 42, y: 42, width: 44, height: 44))
         if s.dwell > 0.01 {
             ctx.setStrokeColor(UIColor(red: 63/255, green: 199/255, blue: 238/255, alpha: 1).cgColor)
-            ctx.setLineWidth(8)
-            let path = UIBezierPath(arcCenter: CGPoint(x: 64, y: 64), radius: 34, startAngle: -.pi / 2, endAngle: -(.pi / 2) + 2 * .pi * CGFloat(s.dwell), clockwise: true)
+            ctx.setLineWidth(14)
+            let path = UIBezierPath(arcCenter: CGPoint(x: 64, y: 64), radius: 50, startAngle: -.pi / 2, endAngle: -(.pi / 2) + 2 * .pi * CGFloat(s.dwell), clockwise: true)
             path.stroke()
         }
         ctx.setFillColor(col.cgColor)
