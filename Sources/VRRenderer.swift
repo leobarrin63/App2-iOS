@@ -81,6 +81,8 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         video = VideoBridge(device: device)
         construirePipelines()
         construireBuffers()
+        texPanel = creerTextureVide(Panel.W, Panel.H)
+        texCur = creerTextureVide(128, 128)
         panel.onJouer = { [weak self] v in self?.jouer(v) }
         panel.onRecharger = { [weak self] in self?.chargerCatalogue() }
         panel.onOuvrirRecherche = { [weak self] in self?.onOuvrirRecherche?() }
@@ -244,11 +246,11 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         if s.besoinRedessin { s.besoinRedessin = false; panel.draw() }
         viser(dt: dt)
 
-        if panel.dirty, let img = panel.image {
-            texPanel = texture(from: img)
+        if panel.dirty, let img = panel.image, let texPanel {
+            mettreAJour(texPanel, avec: img)
             panel.dirty = false
         }
-        texCur = dessinerCurseur()
+        dessinerCurseur()
 
         let ew = viewW / 2, eh = viewH
         if ew != fboW || eh != fboH, ew > 0, eh > 0 {
@@ -376,57 +378,75 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         encF.endEncoding()
     }
 
-    private func dessinerCurseur() -> MTLTexture? {
-        let taille = 128
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: taille, height: taille))
-        let img = renderer.image { rc in
-            let ctx = rc.cgContext
-            let col: UIColor = s.hot >= 0 ? UIColor(red: 63/255, green: 199/255, blue: 238/255, alpha: 1) : UIColor(red: 124/255, green: 178/255, blue: 240/255, alpha: 1)
-            ctx.setStrokeColor(UIColor(red: 10/255, green: 13/255, blue: 19/255, alpha: 0.9).cgColor)
-            ctx.setLineWidth(9)
-            ctx.strokeEllipse(in: CGRect(x: 42, y: 42, width: 44, height: 44))
-            ctx.setStrokeColor(col.cgColor)
-            ctx.setLineWidth(5)
-            ctx.strokeEllipse(in: CGRect(x: 42, y: 42, width: 44, height: 44))
-            if s.dwell > 0.01 {
-                ctx.setStrokeColor(UIColor(red: 63/255, green: 199/255, blue: 238/255, alpha: 1).cgColor)
-                ctx.setLineWidth(8)
-                let path = UIBezierPath(arcCenter: CGPoint(x: 64, y: 64), radius: 34, startAngle: -.pi / 2, endAngle: -(.pi / 2) + 2 * .pi * CGFloat(s.dwell), clockwise: true)
-                path.stroke()
-            }
-            ctx.setFillColor(col.cgColor)
-            ctx.fillEllipse(in: CGRect(x: 59, y: 59, width: 10, height: 10))
+    /* Contexte reutilise d'une frame a l'autre - eviter de reallouer un
+       bitmap Core Graphics 60 fois par seconde (c'etait la premiere
+       moitie du ralentissement observe, surtout visible pendant la
+       selection puisque le curseur se redessine a chaque frame). */
+    private lazy var cursorCtx: CGContext = {
+        let ctx = CGContext(
+            data: nil, width: 128, height: 128, bitsPerComponent: 8, bytesPerRow: 128 * 4,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        // Retournement applique une seule fois ici (pas a chaque frame,
+        // sinon la transformation s'accumulerait) pour retrouver les
+        // coordonnees haut-gauche d'UIKit qu'attend le dessin ci-dessous.
+        ctx.translateBy(x: 0, y: 128)
+        ctx.scaleBy(x: 1, y: -1)
+        return ctx
+    }()
+
+    private func dessinerCurseur() {
+        guard let tex = texCur else { return }
+        let ctx = cursorCtx
+        ctx.clear(CGRect(x: 0, y: 0, width: 128, height: 128))
+        UIGraphicsPushContext(ctx)
+        let col: UIColor = s.hot >= 0 ? UIColor(red: 63/255, green: 199/255, blue: 238/255, alpha: 1) : UIColor(red: 124/255, green: 178/255, blue: 240/255, alpha: 1)
+        ctx.setStrokeColor(UIColor(red: 10/255, green: 13/255, blue: 19/255, alpha: 0.9).cgColor)
+        ctx.setLineWidth(9)
+        ctx.strokeEllipse(in: CGRect(x: 42, y: 42, width: 44, height: 44))
+        ctx.setStrokeColor(col.cgColor)
+        ctx.setLineWidth(5)
+        ctx.strokeEllipse(in: CGRect(x: 42, y: 42, width: 44, height: 44))
+        if s.dwell > 0.01 {
+            ctx.setStrokeColor(UIColor(red: 63/255, green: 199/255, blue: 238/255, alpha: 1).cgColor)
+            ctx.setLineWidth(8)
+            let path = UIBezierPath(arcCenter: CGPoint(x: 64, y: 64), radius: 34, startAngle: -.pi / 2, endAngle: -(.pi / 2) + 2 * .pi * CGFloat(s.dwell), clockwise: true)
+            path.stroke()
         }
-        guard let cg = img.cgImage else { return nil }
-        return texture(from: cg)
+        ctx.setFillColor(col.cgColor)
+        ctx.fillEllipse(in: CGRect(x: 59, y: 59, width: 10, height: 10))
+        UIGraphicsPopContext()
+        guard let data = ctx.data else { return }
+        tex.replace(region: MTLRegionMake2D(0, 0, 128, 128), mipmapLevel: 0, withBytes: data, bytesPerRow: 128 * 4)
     }
 
-    /* Upload manuel, deterministe, sans passer par MTKTextureLoader dont
-       l'option d'origine n'a pas donne de resultat fiable (plusieurs
-       combinaisons testees sans effet observable). Le contexte est
+    private func creerTextureVide(_ w: Int, _ h: Int) -> MTLTexture {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
+        desc.usage = [.shaderRead]
+        return device.makeTexture(descriptor: desc)!
+    }
+
+    /* Met a jour une texture Metal EXISTANTE plutot que d'en creer une
+       nouvelle a chaque appel (couteux cote GPU, c'etait la deuxieme
+       moitie du ralentissement - le menu se redessine a chaque
+       changement de zone visee pendant la selection). Le contexte est
        explicitement retourne (translate+scale) pour que la ligne 0 du
        buffer corresponde au HAUT de l'image, ce qui correspond
        directement a la convention native Metal (UV (0,0) = coin haut-
        gauche de la texture). */
-    private func texture(from cgImage: CGImage) -> MTLTexture? {
-        let w = cgImage.width, h = cgImage.height
-        guard w > 0, h > 0 else { return nil }
+    private func mettreAJour(_ tex: MTLTexture, avec cgImage: CGImage) {
+        let w = tex.width, h = tex.height
         let bytesPerRow = w * 4
         guard let ctx = CGContext(
             data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: bytesPerRow,
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
+        ) else { return }
         ctx.translateBy(x: 0, y: CGFloat(h))
         ctx.scaleBy(x: 1, y: -1)
         ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
-        guard let data = ctx.data else { return nil }
-
-        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
-        desc.usage = [.shaderRead]
-        guard let tex = device.makeTexture(descriptor: desc) else { return nil }
+        guard let data = ctx.data else { return }
         tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: data, bytesPerRow: bytesPerRow)
-        return tex
     }
 
     // ---------- visee (curseur base sur le regard) ----------
