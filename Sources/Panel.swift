@@ -129,12 +129,17 @@ final class Panel {
 
         let sy: CGFloat = 164
         let chaudSearch = vise("search")
-        rect(ctx, 40, sy, 1100, 50, 25, fill: couleurFond(false, chaudSearch), stroke: couleurBord(false, chaudSearch))
-        let texteRecherche = s.recherche.isEmpty ? "Rechercher une video" : s.recherche
+        rect(ctx, 40, sy, 1100, 50, 25, fill: couleurFond(s.rechActive, chaudSearch), stroke: couleurBord(s.rechActive, chaudSearch))
+        let texteRecherche = s.recherche.isEmpty ? "Rechercher une video" : s.recherche + (s.rechActive ? "_" : "")
         txt(texteRecherche, 66, sy + 32, 20, s.recherche.isEmpty ? UIColor(white: 1, alpha: 0.35) : .white)
         zones.append(Zone(id: "search", rect: CGRect(x: 40, y: sy, width: 1000, height: 50)))
         if !s.recherche.isEmpty {
             bouton(ctx, "clear", 1054, sy + 6, 60, 38, "X", taille: 18)
+        }
+
+        if s.rechActive {
+            clavier(ctx)
+            return
         }
 
         let l = liste()
@@ -169,6 +174,36 @@ final class Panel {
             bouton(ctx, "down", 1096, ly + 78, 44, 70, "v", taille: 20)
             txt("\(off + 1)-\(min(l.count, off + vis))/\(l.count)", 1118, ly + 170, 14, UIColor(white: 1, alpha: 0.35), centre: true, mono: true)
         }
+    }
+
+    /* Clavier virtuel AZERTY dans le menu 3D lui-meme : navigable au
+       regard + clic (dwell) ou a la souris gyroscopique, comme le reste
+       du menu - pas besoin d'enlever le casque pour voir le clavier
+       systeme iOS. */
+    private func clavier(_ ctx: CGContext) {
+        let rangee1 = Array("AZERTYUIOP")
+        let rangee2 = Array("QSDFGHJKLM")
+        let rangee3 = Array("WXCVBN")
+        let largeurTouche: CGFloat = 104, ecart: CGFloat = 6, hauteur: CGFloat = 74, gapV: CGFloat = 8
+        let y1: CGFloat = 228, y2 = y1 + hauteur + gapV, y3 = y2 + hauteur + gapV, y4 = y3 + hauteur + gapV
+
+        func rangeeTouches(_ lettres: [Character], _ x0: CGFloat, _ y: CGFloat) {
+            var x = x0
+            for l in lettres {
+                bouton(ctx, "kb:\(l)", x, y, largeurTouche, hauteur, String(l), taille: 24)
+                x += largeurTouche + ecart
+            }
+        }
+
+        rangeeTouches(rangee1, 40, y1)
+        let x2 = 40 + (CGFloat(rangee1.count - rangee2.count)) * (largeurTouche + ecart) / 2
+        rangeeTouches(rangee2, x2, y2)
+        rangeeTouches(rangee3, 40, y3)
+        let xEffacer = 40 + CGFloat(rangee3.count) * (largeurTouche + ecart)
+        bouton(ctx, "kb:effacer", xEffacer, y3, CGFloat(Panel.W) - 40 - xEffacer, hauteur, "EFFACER", taille: 20)
+
+        bouton(ctx, "kb:espace", 40, y4, 700, hauteur, "ESPACE", taille: 20)
+        bouton(ctx, "kb:ok", 760, y4, CGFloat(Panel.W) - 40 - 760, hauteur, "OK", actif: true, taille: 22)
     }
 
     private func lunettes(_ ctx: CGContext) {
@@ -219,16 +254,23 @@ final class Panel {
     // ---------- actions ----------
     var onJouer: ((Video) -> Void)?
     var onRecharger: (() -> Void)?
-    var onOuvrirRecherche: (() -> Void)?
 
     func agir(_ id: String) {
         switch true {
         case id.hasPrefix("tab:"): s.tab = String(id.dropFirst(4)); s.hot = -1
         case id.hasPrefix("feed:"): s.feed = String(id.dropFirst(5)); s.defil = 0
-        case id == "search": onOuvrirRecherche?()
+        case id == "search": s.rechActive = true; s.hot = -1
         case id == "clear": s.recherche = ""; s.defil = 0
         case id == "up": s.defil = max(0, s.defil - 1)
         case id == "down": s.defil += 1
+        case id == "kb:ok": s.rechActive = false; s.hot = -1
+        case id == "kb:espace": s.recherche += " "; s.defil = 0
+        case id == "kb:effacer":
+            if !s.recherche.isEmpty { s.recherche.removeLast() }
+            s.defil = 0
+        case id.hasPrefix("kb:"):
+            s.recherche += String(id.dropFirst(3)).lowercased()
+            s.defil = 0
         case id.hasPrefix("play:"):
             let vid = String(id.dropFirst(5))
             if let v = lib.first(where: { $0.id == vid }) {

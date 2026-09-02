@@ -60,13 +60,6 @@ final class VRRenderer: NSObject, MTKViewDelegate {
     private var panelYaw: Float = 0
 
     var onEtatChange: (() -> Void)?
-    var onOuvrirRecherche: (() -> Void)?
-
-    func definirRecherche(_ texte: String) {
-        s.recherche = texte
-        s.defil = 0
-        panel.draw()
-    }
 
     override init() {
         device = MTLCreateSystemDefaultDevice()!
@@ -85,7 +78,6 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         texCur = creerTextureVide(128, 128)
         panel.onJouer = { [weak self] v in self?.jouer(v) }
         panel.onRecharger = { [weak self] in self?.chargerCatalogue() }
-        panel.onOuvrirRecherche = { [weak self] in self?.onOuvrirRecherche?() }
         panel.draw()
         tete.start()
         chargerCatalogue()

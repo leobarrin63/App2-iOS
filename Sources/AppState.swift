@@ -24,6 +24,7 @@ final class AppState: ObservableObject {
     var tab: String = "videos"     // videos | glasses | settings
     var feed: String = "sugg"      // sugg | trend | new
     var recherche: String = ""
+    var rechActive: Bool = false   // clavier virtuel affiche
     var defil: Int = 0
     var info: String = ""
     var infoT: Float = 0
