@@ -176,34 +176,41 @@ final class Panel {
         }
     }
 
-    /* Clavier virtuel AZERTY dans le menu 3D lui-meme : navigable au
-       regard + clic (dwell) ou a la souris gyroscopique, comme le reste
-       du menu - pas besoin d'enlever le casque pour voir le clavier
-       systeme iOS. */
+    /* Clavier virtuel dans le menu 3D lui-meme : navigable au regard +
+       clic (dwell) ou a la souris gyroscopique, comme le reste du menu -
+       pas besoin d'enlever le casque pour voir le clavier systeme iOS.
+       QWERTY par defaut, bascule vers AZERTY possible. Touches plus
+       grandes et plus espacees que la premiere version (plus tolerant
+       si la visee au regard n'est pas parfaitement precise). */
     private func clavier(_ ctx: CGContext) {
-        let rangee1 = Array("AZERTYUIOP")
-        let rangee2 = Array("QSDFGHJKLM")
-        let rangee3 = Array("WXCVBN")
-        let largeurTouche: CGFloat = 104, ecart: CGFloat = 6, hauteur: CGFloat = 74, gapV: CGFloat = 8
-        let y1: CGFloat = 228, y2 = y1 + hauteur + gapV, y3 = y2 + hauteur + gapV, y4 = y3 + hauteur + gapV
+        let qwerty = [Array("QWERTYUIOP"), Array("ASDFGHJKL"), Array("ZXCVBNM")]
+        let azerty = [Array("AZERTYUIOP"), Array("QSDFGHJKLM"), Array("WXCVBN")]
+        let rangees = s.azerty ? azerty : qwerty
+
+        let w: CGFloat = 100, ecart: CGFloat = 11, h: CGFloat = 80, gapV: CGFloat = 10
+        let y1: CGFloat = 224, y2 = y1 + h + gapV, y3 = y2 + h + gapV, y4 = y3 + h + gapV
+        let largeurRangee1 = CGFloat(rangees[0].count) * (w + ecart) - ecart
 
         func rangeeTouches(_ lettres: [Character], _ x0: CGFloat, _ y: CGFloat) {
             var x = x0
             for l in lettres {
-                bouton(ctx, "kb:\(l)", x, y, largeurTouche, hauteur, String(l), taille: 24)
-                x += largeurTouche + ecart
+                bouton(ctx, "kb:\(l)", x, y, w, h, String(l), taille: 26)
+                x += w + ecart
             }
         }
 
-        rangeeTouches(rangee1, 40, y1)
-        let x2 = 40 + (CGFloat(rangee1.count - rangee2.count)) * (largeurTouche + ecart) / 2
-        rangeeTouches(rangee2, x2, y2)
-        rangeeTouches(rangee3, 40, y3)
-        let xEffacer = 40 + CGFloat(rangee3.count) * (largeurTouche + ecart)
-        bouton(ctx, "kb:effacer", xEffacer, y3, CGFloat(Panel.W) - 40 - xEffacer, hauteur, "EFFACER", taille: 20)
+        rangeeTouches(rangees[0], 40, y1)
+        let x2 = 40 + (largeurRangee1 - (CGFloat(rangees[1].count) * (w + ecart) - ecart)) / 2
+        rangeeTouches(rangees[1], x2, y2)
 
-        bouton(ctx, "kb:espace", 40, y4, 660, hauteur, "ESPACE", taille: 20)
-        bouton(ctx, "kb:ok", 716, y4, CGFloat(Panel.W) - 40 - 716, hauteur, "FERMER LE CLAVIER", actif: true, taille: 20)
+        let x3 = 40
+        rangeeTouches(rangees[2], x3, y3)
+        let xDel = x3 + CGFloat(rangees[2].count) * (w + ecart)
+        bouton(ctx, "kb:del", xDel, y3, CGFloat(Panel.W) - 40 - xDel, h, "DEL", taille: 22)
+
+        bouton(ctx, "kb:layout", 40, y4, 220, h, s.azerty ? "AZERTY" : "QWERTY", taille: 20)
+        bouton(ctx, "kb:espace", 276, y4, 560, h, "SPACE", taille: 20)
+        bouton(ctx, "kb:ok", 852, y4, CGFloat(Panel.W) - 40 - 852, h, "CLOSE", actif: true, taille: 22)
     }
 
     private func lunettes(_ ctx: CGContext) {
@@ -265,7 +272,8 @@ final class Panel {
         case id == "down": s.defil += 1
         case id == "kb:ok": s.rechActive = false; s.hot = -1
         case id == "kb:espace": s.recherche += " "; s.defil = 0
-        case id == "kb:effacer":
+        case id == "kb:layout": s.azerty.toggle(); s.hot = -1
+        case id == "kb:del":
             if !s.recherche.isEmpty { s.recherche.removeLast() }
             s.defil = 0
         case id.hasPrefix("kb:"):

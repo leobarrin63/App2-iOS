@@ -25,6 +25,7 @@ final class AppState: ObservableObject {
     var feed: String = "sugg"      // sugg | trend | new
     var recherche: String = ""
     var rechActive: Bool = false   // clavier virtuel affiche
+    var azerty: Bool = false       // QWERTY (defaut) ou AZERTY
     var defil: Int = 0
     var info: String = ""
     var infoT: Float = 0
