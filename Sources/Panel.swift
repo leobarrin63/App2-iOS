@@ -202,8 +202,8 @@ final class Panel {
         let xEffacer = 40 + CGFloat(rangee3.count) * (largeurTouche + ecart)
         bouton(ctx, "kb:effacer", xEffacer, y3, CGFloat(Panel.W) - 40 - xEffacer, hauteur, "EFFACER", taille: 20)
 
-        bouton(ctx, "kb:espace", 40, y4, 700, hauteur, "ESPACE", taille: 20)
-        bouton(ctx, "kb:ok", 760, y4, CGFloat(Panel.W) - 40 - 760, hauteur, "OK", actif: true, taille: 22)
+        bouton(ctx, "kb:espace", 40, y4, 660, hauteur, "ESPACE", taille: 20)
+        bouton(ctx, "kb:ok", 716, y4, CGFloat(Panel.W) - 40 - 716, hauteur, "FERMER LE CLAVIER", actif: true, taille: 20)
     }
 
     private func lunettes(_ ctx: CGContext) {
@@ -259,7 +259,7 @@ final class Panel {
         switch true {
         case id.hasPrefix("tab:"): s.tab = String(id.dropFirst(4)); s.hot = -1
         case id.hasPrefix("feed:"): s.feed = String(id.dropFirst(5)); s.defil = 0
-        case id == "search": s.rechActive = true; s.hot = -1
+        case id == "search": s.rechActive.toggle(); s.hot = -1
         case id == "clear": s.recherche = ""; s.defil = 0
         case id == "up": s.defil = max(0, s.defil - 1)
         case id == "down": s.defil += 1

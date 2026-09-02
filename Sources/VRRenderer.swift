@@ -423,24 +423,26 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         return device.makeTexture(descriptor: desc)!
     }
 
-    /* Met a jour une texture Metal EXISTANTE plutot que d'en creer une
-       nouvelle a chaque appel (couteux cote GPU, c'etait la deuxieme
-       moitie du ralentissement - le menu se redessine a chaque
-       changement de zone visee pendant la selection). Le contexte est
-       explicitement retourne (translate+scale) pour que la ligne 0 du
-       buffer corresponde au HAUT de l'image, ce qui correspond
-       directement a la convention native Metal (UV (0,0) = coin haut-
-       gauche de la texture). */
+    /* Contexte reutilise d'une frame a l'autre, comme cursorCtx : le
+       clavier appelait mettreAJour() a chaque lettre tapee, et cette
+       fonction reallouait un bitmap de 1180x720 (~3,4 Mo) a chaque fois -
+       c'etait le nouveau point chaud une fois l'allocation de texture
+       Metal elle-meme corrigee. Retournement applique une seule fois a
+       la creation, comme pour cursorCtx. */
+    private lazy var panelCtx: CGContext = {
+        let ctx = CGContext(
+            data: nil, width: Panel.W, height: Panel.H, bitsPerComponent: 8, bytesPerRow: Panel.W * 4,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        ctx.translateBy(x: 0, y: CGFloat(Panel.H))
+        ctx.scaleBy(x: 1, y: -1)
+        return ctx
+    }()
+
     private func mettreAJour(_ tex: MTLTexture, avec cgImage: CGImage) {
         let w = tex.width, h = tex.height
         let bytesPerRow = w * 4
-        guard let ctx = CGContext(
-            data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return }
-        ctx.translateBy(x: 0, y: CGFloat(h))
-        ctx.scaleBy(x: 1, y: -1)
+        let ctx = panelCtx
         ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
         guard let data = ctx.data else { return }
         tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: data, bytesPerRow: bytesPerRow)
