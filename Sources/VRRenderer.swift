@@ -476,7 +476,13 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         }
 
         var trouve = -1
-        let px = CGFloat(s.curU) * CGFloat(Panel.W), py = CGFloat(s.curV) * CGFloat(Panel.H)
+        // (1 - curU) et pas curU : le mapping U du quad a ete invers pour
+        // corriger l'affichage en miroir (voir construireBuffers), mais ce
+        // calcul de detection n'avait jamais ete mis a jour en consequence
+        // - ce qui visait a gauche testait en realite les zones de droite,
+        // et inversement. C'est la vraie cause des lettres qui ne
+        // correspondaient jamais a la bonne touche.
+        let px = (1 - CGFloat(s.curU)) * CGFloat(Panel.W), py = CGFloat(s.curV) * CGFloat(Panel.H)
         for (i, z) in panel.zones.enumerated() {
             if px >= z.rect.minX, px <= z.rect.maxX, py >= z.rect.minY, py <= z.rect.maxY {
                 trouve = i; break
