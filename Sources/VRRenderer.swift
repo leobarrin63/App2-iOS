@@ -408,9 +408,14 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         ctx.setLineWidth(5)
         ctx.strokeEllipse(in: CGRect(x: 42, y: 42, width: 44, height: 44))
         if s.dwell > 0.01 {
-            ctx.setStrokeColor(UIColor(red: 63/255, green: 199/255, blue: 238/255, alpha: 1).cgColor)
-            ctx.setLineWidth(14)
             let path = UIBezierPath(arcCenter: CGPoint(x: 64, y: 64), radius: 50, startAngle: -.pi / 2, endAngle: -(.pi / 2) + 2 * .pi * CGFloat(s.dwell), clockwise: true)
+            // UIBezierPath a sa propre epaisseur de trait, independante de
+            // ctx.setLineWidth() qui ne s'applique qu'aux traces directs
+            // sur le CGContext (comme strokeEllipse juste au-dessus) -
+            // c'est pour ca que l'anneau restait fin malgre le changement
+            // precedent.
+            path.lineWidth = 14
+            UIColor(red: 63/255, green: 199/255, blue: 238/255, alpha: 1).setStroke()
             path.stroke()
         }
         ctx.setFillColor(col.cgColor)
