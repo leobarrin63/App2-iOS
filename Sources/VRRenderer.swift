@@ -483,7 +483,14 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             }
         }
         if trouve != s.hot {
-            s.hot = trouve; s.dwell = 0; panel.draw()
+            // Le clic en attente ne doit jamais s'appliquer a une AUTRE
+            // zone que celle deja visee au moment du clic - sinon une
+            // micro-secousse de la tete au moment d'appuyer sur le bouton
+            // de la souris (physiquement plausible) fait basculer la cible
+            // juste avant que le clic ne soit traite, et l'action tombe
+            // sur la case voisine (ex : viser B, cliquer, la tete devie
+            // legerement vers V au meme instant -> V est active).
+            s.hot = trouve; s.dwell = 0; s.clickWanted = false; panel.draw()
         } else if trouve >= 0 {
             if s.clickWanted {
                 s.clickWanted = false; s.dwell = 0
