@@ -203,7 +203,7 @@ final class Panel {
         let x2 = 40 + (largeurRangee1 - (CGFloat(rangees[1].count) * (w + ecart) - ecart)) / 2
         rangeeTouches(rangees[1], x2, y2)
 
-        let x3 = 40
+        let x3: CGFloat = 40
         rangeeTouches(rangees[2], x3, y3)
         let xDel = x3 + CGFloat(rangees[2].count) * (w + ecart)
         bouton(ctx, "kb:del", xDel, y3, CGFloat(Panel.W) - 40 - xDel, h, "DEL", taille: 22)
