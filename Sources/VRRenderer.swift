@@ -443,6 +443,13 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         let w = tex.width, h = tex.height
         let bytesPerRow = w * 4
         let ctx = panelCtx
+        // Sans ce clear, le fond semi-transparent du menu (alpha 0.91)
+        // se composite par-dessus TOUTES les images precedentes jamais
+        // dessinees dans ce contexte reutilise, au lieu de les remplacer -
+        // c'etait la vraie cause du clavier "qui ne se ferme pas" (l'etat
+        // changeait bien, mais le visuel affichait un mélange incoherent
+        // d'anciennes frames).
+        ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
         ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
         guard let data = ctx.data else { return }
         tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: data, bytesPerRow: bytesPerRow)
