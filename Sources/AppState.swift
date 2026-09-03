@@ -10,6 +10,7 @@ final class AppState: ObservableObject {
     var k1: Float = 0.22      // distorsion barillet
     var menuDist: Float = 1.25 // m
     var menuAngle: Float = 82  // degres
+    var sensGaze: Float = 1.8  // multiplicateur : deplace le curseur plus vite que la tete, sans changer la taille visuelle du menu
     var smooth: Float = 0.35
     var menu: Bool = true
 

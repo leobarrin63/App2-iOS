@@ -470,8 +470,12 @@ final class VRRenderer: NSObject, MTKViewDelegate {
                 let hx = f.x * t - P.x, hy2 = f.y * t - P.y, hz = f.z * t - P.z
                 let lu = hx * c + hz * (-sn)
                 let lv = hy2
-                s.curU = lu / ps.0 + 0.5
-                s.curV = 0.5 - lv / ps.1
+                // sensGaze amplifie le deplacement du curseur sans changer
+                // la taille visuelle du menu (ps.0/ps.1, utilise ailleurs
+                // pour le rendu) : moins besoin de tourner la tete pour
+                // aller d'un bout a l'autre.
+                s.curU = min(max(lu * s.sensGaze / ps.0 + 0.5, 0), 1)
+                s.curV = min(max(0.5 - lv * s.sensGaze / ps.1, 0), 1)
             }
         }
 

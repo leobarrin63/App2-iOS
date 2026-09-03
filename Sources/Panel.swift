@@ -242,6 +242,7 @@ final class Panel {
             ("DISTORSION", String(format: "%.2f", s.k1), "k1"),
             ("DISTANCE DU MENU", String(format: "%.2f m", s.menuDist), "menuDist"),
             ("TAILLE DU MENU", String(format: "%.0f deg", s.menuAngle), "menuAngle"),
+            ("SENSIBILITE DU REGARD", String(format: "%.1fx", s.sensGaze), "sensGaze"),
             ("LISSAGE", String(format: "%.0f %%", s.smooth * 100), "smooth"),
         ]
         var y: CGFloat = 112
@@ -306,6 +307,7 @@ final class Panel {
             case "k1": s.k1 = min(max(s.k1 + (plus ? 0.02 : -0.02), 0), 0.6)
             case "menuDist": s.menuDist = min(max(s.menuDist + (plus ? 0.05 : -0.05), 0.8), 3)
             case "menuAngle": s.menuAngle = min(max(s.menuAngle + (plus ? 2 : -2), 40), 96)
+            case "sensGaze": s.sensGaze = min(max(s.sensGaze + (plus ? 0.2 : -0.2), 1), 4)
             case "smooth": s.smooth = min(max(s.smooth + (plus ? 0.05 : -0.05), 0), 0.9)
             default: break
             }
