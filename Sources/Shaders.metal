@@ -65,7 +65,9 @@ fragment float4 fsEnv(VNOut in [[stage_in]], constant EnvUniforms &u [[buffer(0)
     col += float3(0.02, 0.07, 0.16) * trail * band * colM * 0.45;
 
     if (el < -0.004) {
-        float t = 1.7 / (-el);
+        // sol a 1,70 m sous la position de depart de la tete : en 6DoF,
+        // uEye.y monte et descend avec la tete (s'accroupir rapproche le sol)
+        float t = max(1.7 + u.uEye.y, 0.05) / (-el);
         float3 p = u.uEye + d * t;
         float fog = exp(-t * 0.035);
         float2 gf = abs(fract(p.xz / 1.2) - 0.5);

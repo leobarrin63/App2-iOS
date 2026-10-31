@@ -21,6 +21,14 @@ final class AppState: ObservableObject {
     var sensorOk: Bool = false
     var yawOffset: Float = 0
 
+    // 6DoF : position de la tete suivie par la camera (ARKit). Si le suivi
+    // n'est pas disponible, on retombe sur la rotation seule (Core Motion).
+    var mode6dof: Bool = true
+    var etat6dof: String = ""         // affiche dans l'onglet LUNETTES
+    var pos6dof: Bool = false         // la position vient vraiment d'ARKit
+    var posX: Float = 0; var posY: Float = 0; var posZ: Float = 0
+    var demandeRecentrage: Bool = false
+
     // navigation menu
     var tab: String = "videos"     // videos | glasses | settings
     var feed: String = "sugg"      // sugg | trend | new

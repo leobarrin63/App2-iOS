@@ -46,6 +46,7 @@ final class VRRenderer: NSObject, MTKViewDelegate {
 
     private let panel = Panel()
     private let tete = HeadTracker()
+    private let ar = ArTracker()
     private var video: VideoBridge!
 
     private let s = AppState.shared
@@ -58,6 +59,17 @@ final class VRRenderer: NSObject, MTKViewDelegate {
     private var Q = SIMD4<Float>(0, 0, 0, 1)   // quaternion lisse
     private var M = matrix_identity_float3x3
     private var panelYaw: Float = 0
+
+    // 6DoF : position de la tete dans le monde (m), et point autour duquel
+    // le menu est pose. L'origine de recentrage efface la position et le
+    // lacet du moment ou l'on appuie sur RECENTRER.
+    private var tetePos = SIMD3<Float>(0, 0, 0)
+    private var panelCentre = SIMD3<Float>(0, 0, 0)
+    private var origineLacet: Float = 0
+    private var originePos = SIMD3<Float>(0, 0, 0)
+    private var origineAFixer = true
+    private var menuAvant = true
+    private var rafraichLunettes: Float = 0
 
     var onEtatChange: (() -> Void)?
 
@@ -212,6 +224,8 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         ))
         M = correctionLacet * M
 
+        poseTete(dt: dt)
+
         let yaw = atan2(M.columns.2.x, M.columns.2.z)
         s.dbgYaw = yaw
         s.dbgPitch = asin(min(max(M.columns.2.y * -1, -1), 1))
@@ -235,6 +249,24 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             panelYaw += (abs(diff) - dead) * (diff < 0 ? -1 : 1) * min(1, dt * 3.5)
         }
 
+        // Le menu reste fixe dans la piece (on peut s'en approcher, tourner
+        // autour), mais il revient vers la tete a l'ouverture, ou si l'on
+        // s'en eloigne de plus de 50 cm - meme principe de zone morte que
+        // pour le lacet juste au-dessus.
+        if s.menu && !menuAvant { panelCentre = tetePos; panelYaw = yaw }
+        menuAvant = s.menu
+        let ecart = tetePos - panelCentre
+        let dist = simd_length(ecart)
+        if dist > 0.5 {
+            panelCentre += ecart * ((dist - 0.5) / dist) * min(1, dt * 3)
+        }
+
+        // onglet LUNETTES : les valeurs (angles, position 6DoF) changent en
+        // continu, on le redessine 4 fois par seconde
+        if s.menu && s.tab == "glasses" {
+            rafraichLunettes += dt
+            if rafraichLunettes > 0.25 { rafraichLunettes = 0; s.besoinRedessin = true }
+        }
         if s.besoinRedessin { s.besoinRedessin = false; panel.draw() }
         viser(dt: dt)
 
@@ -272,12 +304,18 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         let ipd = s.ipd / 1000
         let ex = signe * ipd / 2
         let proj = perspective(s.fov * .pi / 180, asp, 0.05, 100)
-        let view = simd_float4x4(columns: (
+        var view = simd_float4x4(columns: (
             SIMD4(M.columns.0.x, M.columns.1.x, M.columns.2.x, 0),
             SIMD4(M.columns.0.y, M.columns.1.y, M.columns.2.y, 0),
             SIMD4(M.columns.0.z, M.columns.1.z, M.columns.2.z, 0),
             SIMD4(-ex, 0, 0, 1)
         ))
+        // Position de la tete : on deplace la camera de -(M^T * tetePos),
+        // soit la position exprimee dans le repere de la tete. Sans 6DoF,
+        // tetePos vaut 0 et la vue est identique a avant.
+        let a = simd_transpose(M) * tetePos
+        view.columns.3 = SIMD4(-ex - a.x, -a.y, -a.z, 1)
+        let oeilMonde = tetePos + M * SIMD3<Float>(ex, 0, 0)
         let VP = proj * view
 
         // ---- passe hors-ecran : decor ou video, puis panneau + curseur ----
@@ -311,7 +349,7 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             enc.setRenderPipelineState(pEnv)
             enc.setVertexBuffer(quadBuf, offset: 0, index: 0)
             let ty = tan(s.fov * .pi / 360)
-            var u = EnvUniforms(uRot: simd_float4x4(M), uTan: SIMD2(ty * asp, ty), uEye: SIMD3(ex, 0, 0), uT: temps)
+            var u = EnvUniforms(uRot: simd_float4x4(M), uTan: SIMD2(ty * asp, ty), uEye: oeilMonde, uT: temps)
             enc.setFragmentBytes(&u, length: MemoryLayout<EnvUniforms>.stride, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
@@ -322,7 +360,7 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             let U = SIMD3<Float>(c, 0, -sn)
             let V = SIMD3<Float>(0, 1, 0)
             let N = SIMD3<Float>(sn, 0, c)
-            let P = SIMD3<Float>(-sn * s.menuDist, 0, -c * s.menuDist)
+            let P = panelCentre + SIMD3<Float>(-sn * s.menuDist, 0, -c * s.menuDist)
 
             enc.setRenderPipelineState(pQuad)
             enc.setVertexBuffer(planBuf, offset: 0, index: 0)
@@ -455,6 +493,50 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: data, bytesPerRow: bytesPerRow)
     }
 
+    // ---------- 6DoF ----------
+    /* Remplace M (rotation Core Motion) par la pose ARKit quand le suivi
+       camera est disponible, et renseigne tetePos. Sinon, rotation seule :
+       tetePos = 0, le rendu est exactement celui d'avant. */
+    private func poseTete(dt: Float) {
+        guard s.mode6dof else {
+            ar.stop()
+            s.pos6dof = false; s.etat6dof = "6DOF DESACTIVE (ROTATION SEULE)"
+            tetePos = .zero; origineAFixer = true
+            return
+        }
+        guard ArTracker.disponible else {
+            s.pos6dof = false; s.etat6dof = "6DOF NON SUPPORTE SUR CET APPAREIL"
+            tetePos = .zero
+            return
+        }
+        ar.start()
+        guard let p = ar.pose() else {
+            s.pos6dof = false; s.etat6dof = "6DOF : CAMERA INDISPONIBLE (ROTATION SEULE)"
+            tetePos = .zero
+            return
+        }
+        let lacetBrut = atan2(p.rotation.columns.2.x, p.rotation.columns.2.z)
+        if origineAFixer || s.demandeRecentrage {
+            origineLacet = lacetBrut
+            originePos = p.position
+            origineAFixer = false
+            s.demandeRecentrage = false
+        }
+        // rotation de -origineLacet autour de Y (meme forme que
+        // correctionLacet) : le regard au moment du recentrage devient -Z.
+        let c = cos(-origineLacet), sn = sin(-origineLacet)
+        let ry = matrix_float3x3(columns: (
+            SIMD3(c, 0, -sn),
+            SIMD3(0, 1, 0),
+            SIMD3(sn, 0, c)
+        ))
+        M = ry * p.rotation
+        tetePos = ry * (p.position - originePos)
+        s.pos6dof = true
+        s.etat6dof = p.etat
+        s.posX = tetePos.x; s.posY = tetePos.y; s.posZ = tetePos.z
+    }
+
     // ---------- visee (curseur base sur le regard) ----------
     private func viser(dt: Float) {
         if !s.menu { s.hot = -1; return }
@@ -462,12 +544,15 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         let f = SIMD3<Float>(-M.columns.2.x, -M.columns.2.y, -M.columns.2.z)
         let c = cos(panelYaw), sn = sin(panelYaw)
         let N = SIMD3<Float>(sn, 0, c)
-        let P = SIMD3<Float>(-sn * s.menuDist, 0, -c * s.menuDist)
+        let P = panelCentre + SIMD3<Float>(-sn * s.menuDist, 0, -c * s.menuDist)
+        // Le rayon du regard part de la tete (tetePos), plus de l'origine.
+        let O = tetePos
         let den = f.x * N.x + f.y * N.y + f.z * N.z
         if den < -1e-4 {
-            let t = (P.x * N.x + P.y * N.y + P.z * N.z) / den
+            let t = simd_dot(P - O, N) / den
             if t > 0 {
-                let hx = f.x * t - P.x, hy2 = f.y * t - P.y, hz = f.z * t - P.z
+                let h = O + f * t - P
+                let hx = h.x, hy2 = h.y, hz = h.z
                 let lu = hx * c + hz * (-sn)
                 let lv = hy2
                 // sensGaze amplifie le deplacement du curseur sans changer

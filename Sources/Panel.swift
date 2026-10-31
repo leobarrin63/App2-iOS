@@ -233,6 +233,16 @@ final class Panel {
             if deg > 180 { deg -= 360 }; if deg < -180 { deg += 360 }
             txt(String(format: "%.1f deg", deg), x, 350, 34, .white, mono: true)
         }
+
+        // 6DoF : etat du suivi camera + position de la tete
+        let vert = UIColor(red: 91/255, green: 214/255, blue: 164/255, alpha: 1)
+        let orange = UIColor(red: 232/255, green: 196/255, blue: 90/255, alpha: 1)
+        rect(ctx, 40, 398, 1100, 120, 12, fill: UIColor(white: 1, alpha: 0.04), stroke: UIColor(red: 43/255, green: 57/255, blue: 73/255, alpha: 1))
+        txt(s.etat6dof, 66, 434, 20, s.pos6dof ? vert : orange, gras: true)
+        if s.pos6dof {
+            txt(String(format: "X %+.2f   Y %+.2f   Z %+.2f  m", s.posX, s.posY, s.posZ), 66, 486, 30, .white, mono: true)
+        }
+        bouton(ctx, "6dof", 880, 448, 240, 52, s.mode6dof ? "6DOF : OUI" : "6DOF : NON", actif: s.mode6dof, taille: 20)
     }
 
     private func reglages(_ ctx: CGContext) {
@@ -296,7 +306,8 @@ final class Panel {
             onRecharger?(); s.info = "chargement du catalogue..."; s.infoT = 4
         case id == "fmt": s.format = (s.format + 1) % 3; VideoBus.shared.formatVideo = -1
         case id == "yeux": s.yeuxInverses.toggle()
-        case id == "recenter": s.yawOffset = 0
+        case id == "recenter": s.yawOffset = 0; s.demandeRecentrage = true
+        case id == "6dof": s.mode6dof.toggle()
         case id == "hide": s.menu = false
         case id.hasPrefix("set:"):
             let part = id.split(separator: ":")
