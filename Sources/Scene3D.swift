@@ -651,9 +651,9 @@ final class Scene3D {
 
     // normales lissees : somme des normales des triangles autour de chaque sommet
     private func normales(_ a: Anim) {
-        a.pos.withUnsafeBufferPointer { p in
-            a.tri.withUnsafeBufferPointer { tri in
-                a.nrm.withUnsafeMutableBufferPointer { out in
+        a.pos.withUnsafeBufferPointer { (p: UnsafeBufferPointer<Float>) -> Void in
+            a.tri.withUnsafeBufferPointer { (tri: UnsafeBufferPointer<UInt32>) -> Void in
+                a.nrm.withUnsafeMutableBufferPointer { (out: inout UnsafeMutableBufferPointer<Float>) -> Void in
                     for i in 0..<out.count { out[i] = 0 }
                     var i = 0
                     while i + 2 < tri.count {

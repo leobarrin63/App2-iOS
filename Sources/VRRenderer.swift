@@ -739,10 +739,19 @@ final class VRRenderer: NSObject, MTKViewDelegate {
                     fx: camK.x, fy: camK.y, cx: camK.z, cy: camK.w, aspect: camAspect, cam: camPos, rot: M))
             }
         }
-        let actives = s.mains && CACurrentMediaTime() - mains.derniereAnalyse < 2
+        // resultats de la detection, recopies ici, sur la file principale
+        let e = mains.lireEtat()
+        let actives = s.mains && CACurrentMediaTime() - e.derniere < 2
         if s.mainsOk != actives { s.mainsOk = actives; s.besoinRedessin = true }
-        if !s.mains { s.etatMains = "MAINS DESACTIVEES" }
-        else if !actives { s.etatMains = "MAINS : CAMERA INACTIVE" }
+        if actives {
+            if e.clic { s.pinceClic = true }
+            if e.menu { s.basculerMenu = true }
+            s.mainVue = e.vue; s.pince = e.pince; s.progresMenu = e.progres
+            s.etatMains = e.texte; s.cadenceMains = e.cadence
+        } else {
+            s.mainVue = false; s.pince = false; s.progresMenu = 0
+            s.etatMains = s.mains ? "MAINS : CAMERA INACTIVE" : "MAINS DESACTIVEES"
+        }
     }
 
     private func majTexturesCamera(_ f: ARFrame) {

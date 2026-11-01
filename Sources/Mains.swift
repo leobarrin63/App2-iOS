@@ -1,6 +1,7 @@
 import Foundation
 import Vision
 import CoreVideo
+import QuartzCore
 import simd
 
 /* MAINS — pincer pour cliquer, comme sur le Quest 3.
@@ -30,10 +31,22 @@ final class Mains {
         var rot: matrix_float3x3                         // rotation camera -> piece
     }
 
+    /* Resultat de la derniere analyse. Ecrit par la file de detection, lu
+       par le rendu sous verrou : AppState n'est modifie que depuis la file
+       principale (un texte Swift ecrit et lu en meme temps depuis deux
+       files peut faire planter l'app). */
+    struct Etat {
+        var texte = "", cadence = ""
+        var vue = false, pince = false
+        var progres: Float = 0
+        var derniere: CFTimeInterval = 0
+        var clic = false, menu = false      // evenements : remis a zero a la lecture
+    }
+
     private let file = DispatchQueue(label: "mains", qos: .userInteractive)
     private let verrou = NSLock()
     private var occupe = false
-    private let s = AppState.shared
+    private var etat = Etat()
     private let requete: VNDetectHumanHandPoseRequest = {
         let r = VNDetectHumanHandPoseRequest()
         r.maximumHandCount = 2                           // les deux mains, comme le Quest
@@ -51,11 +64,11 @@ final class Mains {
     ]
 
     // mains placees dans la piece : 21 points (x, y, z) puis 1 si la main pince
-    private(set) var mondes: [[Float]] = []
-    private(set) var tempsMondes: CFTimeInterval = 0
-    private(set) var derniereAnalyse: CFTimeInterval = 0
+    private var mondes: [[Float]] = []
+    private var tempsMondes: CFTimeInterval = 0
     private var nbAnalyses = 0
     private var debutCadence: CFTimeInterval = 0
+    private var cadence = ""
 
     private final class EtatPince { var pince = false; var debut: CFTimeInterval = 0; var longFait = false }
     private var etats: [Bool: EtatPince] = [true: EtatPince(), false: EtatPince()]   // true = main droite
@@ -66,6 +79,13 @@ final class Mains {
     func lire() -> (mondes: [[Float]], temps: CFTimeInterval) {
         verrou.lock(); defer { verrou.unlock() }
         return (mondes, tempsMondes)
+    }
+
+    func lireEtat() -> Etat {
+        verrou.lock(); defer { verrou.unlock() }
+        let e = etat
+        etat.clic = false; etat.menu = false
+        return e
     }
 
     /* Confie une image camera a la file de detection. */
@@ -86,11 +106,10 @@ final class Mains {
         let handler = VNImageRequestHandler(cvPixelBuffer: image, orientation: .up, options: [:])
         do { try handler.perform([requete]) } catch { return }
         let maintenant = CACurrentMediaTime()
-        derniereAnalyse = maintenant
         nbAnalyses += 1
         if maintenant - debutCadence >= 1 {
             let c = Double(nbAnalyses) / (maintenant - debutCadence)
-            s.cadenceMains = String(format: "VISION %.0f IM/S", c)
+            cadence = String(format: "VISION %.0f IM/S", c)
             nbAnalyses = 0; debutCadence = maintenant
         }
 
@@ -98,6 +117,7 @@ final class Mains {
         var progres: Float = 0
         var textes: [String] = []
         var sortie: [[Float]] = []
+        var clic = false, menu = false
 
         for obs in requete.results ?? [] {
             guard let pts = try? obs.recognizedPoints(.all) else { continue }
@@ -133,14 +153,14 @@ final class Mains {
             if !st.pince && ratio < 0.25 {
                 st.pince = true; st.debut = maintenant; st.longFait = false
             } else if st.pince && ratio > 0.42 {
-                relacher(st, maintenant)
+                if relacher(st, maintenant) { clic = true }
             }
             if st.pince && !st.longFait {
                 let duree = Float(maintenant - st.debut)
                 if paume { progres = max(progres, min(max((duree - 0.3) / 0.7, 0), 1)) }
                 if paume && duree >= 1 {
                     st.longFait = true
-                    s.basculerMenu = true
+                    menu = true
                 }
             }
             textes.append((droite ? "DROITE" : "GAUCHE") + (paume ? " PAUME" : " DOS") + (st.pince ? " PINCEE" : ""))
@@ -153,24 +173,28 @@ final class Mains {
             }
         }
         // une main qui disparait en pincant : on relache
-        for (cle, st) in etats where !vues.contains(cle) && st.pince { relacher(st, maintenant) }
+        for (cle, st) in etats where !vues.contains(cle) && st.pince { if relacher(st, maintenant) { clic = true } }
         for cle in Array(filtres.keys) where !vues.contains(cle) { filtres[cle] = nil }
-
-        s.mainVue = !vues.isEmpty
-        s.pince = etats.values.contains { $0.pince }
-        s.progresMenu = progres
-        s.etatMains = textes.isEmpty ? "AUCUNE MAIN EN VUE" : "MAIN " + textes.joined(separator: "  +  ")
 
         verrou.lock()
         mondes = sortie
         tempsMondes = maintenant
+        etat.texte = textes.isEmpty ? "AUCUNE MAIN EN VUE" : "MAIN " + textes.joined(separator: "  +  ")
+        etat.cadence = cadence
+        etat.vue = !vues.isEmpty
+        etat.pince = etats.values.contains { $0.pince }
+        etat.progres = progres
+        etat.derniere = maintenant
+        if clic { etat.clic = true }
+        if menu { etat.menu = true }
         verrou.unlock()
     }
 
-    private func relacher(_ st: EtatPince, _ maintenant: CFTimeInterval) {
+    // vrai si c'etait une pincee courte (un clic)
+    private func relacher(_ st: EtatPince, _ maintenant: CFTimeInterval) -> Bool {
         let duree = maintenant - st.debut
         st.pince = false
-        if !st.longFait && duree < 0.6 { s.pinceClic = true }
+        return !st.longFait && duree < 0.6
     }
 
     /* Chaque point de l'image donne une direction depuis la camera. La
