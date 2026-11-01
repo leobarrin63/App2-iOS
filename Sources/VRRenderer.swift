@@ -3,6 +3,7 @@ import UIKit
 import Metal
 import MetalKit
 import ARKit
+import AVFoundation
 import simd
 
 /* Equivalent de VrRenderer + de la boucle onDrawFrame dans
@@ -174,6 +175,9 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         }
         s.appareil = appareil!
         UIApplication.shared.isIdleTimerDisabled = true      // l'ecran ne se met pas en veille dans le casque
+        // le son des videos et des scenes passe meme quand l'iPhone est en mode silencieux
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        try? AVAudioSession.sharedInstance().setActive(true)
     }
 
     static func ppiAppareil() -> Float {
@@ -704,8 +708,9 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         if s.mode6dof, ArTracker.disponible, let p = ar.pose() {
             let lacetBrut = atan2(p.rotation.columns.2.x, p.rotation.columns.2.z)
             if origineAFixer || s.demandeRecentrage {
+                // origine = milieu des yeux a cet instant : la tete demarre pile en (0, 0, 0)
                 origineLacet = lacetBrut
-                originePos = p.position
+                originePos = p.position + p.rotation * oeilDepuisCamera
                 origineAFixer = false
                 s.demandeRecentrage = false
             }
