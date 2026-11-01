@@ -2,13 +2,16 @@ import Foundation
 import UIKit
 import Metal
 import MetalKit
+import ARKit
 import simd
 
 /* Equivalent de VrRenderer + de la boucle onDrawFrame dans
    MainActivity.kt (Android), en Metal. Meme structure : par oeil, on
-   dessine dans une texture intermediaire (decor ou video, puis le
-   panneau menu + curseur par-dessus), puis une passe de composition
-   applique la distorsion barillet vers la moitie d'ecran correspondante. */
+   dessine dans une texture intermediaire (avec profondeur) le fond -
+   passthrough, decor, video ou scene 3D - puis le menu, le curseur et les
+   mains par-dessus ; une passe de composition applique ensuite la
+   distorsion barillet vers la zone de l'ecran placee en face de la
+   lentille de cet oeil. */
 
 private struct EnvUniforms {
     var uRot: simd_float4x4
@@ -25,29 +28,63 @@ private struct LensUniforms {
     var uK1: Float
     var uAsp: Float
 }
+private struct CamUniforms {
+    var uTan: SIMD2<Float>
+    var uZoom: Float
+    var pad: Float
+    var uK: SIMD4<Float>
+}
+private struct MainUniforms {
+    var vp: simd_float4x4
+    var col: SIMD4<Float>
+    var taille: Float
+}
 
 final class VRRenderer: NSObject, MTKViewDelegate {
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let sampler: MTLSamplerState
+    private let samplerScene: MTLSamplerState
+    // au plus 2 images en cours sur le GPU : les tampons animes (anneau de 3) restent surs
+    private let enVol = DispatchSemaphore(value: 2)
 
     private var pEnv: MTLRenderPipelineState!
     private var pVid: MTLRenderPipelineState!
     private var pQuad: MTLRenderPipelineState!
     private var pLens: MTLRenderPipelineState!
+    private var pCam: MTLRenderPipelineState!
+    private var pMain: MTLRenderPipelineState!
+    private var pScene: MTLRenderPipelineState!
+    private var pSceneBlend: MTLRenderPipelineState!
+    private var dsScene: MTLDepthStencilState!
+    private var dsSceneBlend: MTLDepthStencilState!
+    private var dsAucun: MTLDepthStencilState!
 
     private var quadBuf: MTLBuffer!   // plein ecran, triangle strip
     private var planBuf: MTLBuffer!   // quad panneau/curseur (position+uv)
 
     private var texPanel: MTLTexture?
     private var texCur: MTLTexture?
+    private var texBlanche: MTLTexture!
     private var fboTex: MTLTexture?
+    private var fboProf: MTLTexture?
     private var fboW = 0, fboH = 0
 
     private let panel = Panel()
     private let tete = HeadTracker()
     private let ar = ArTracker()
+    private let mains = Mains()
     private var video: VideoBridge!
+    private var scene: Scene3D?
+
+    // image camera (passthrough) : Y + CbCr, intrinseques normalisees
+    private var cacheCam: CVMetalTextureCache?
+    private var camY: CVMetalTexture?
+    private var camUV: CVMetalTexture?
+    private var camK = SIMD4<Float>(0, 0, 0, 0)
+    private var camAspect: Float = 4.0 / 3.0
+    private var camOk = false
+    private var dernierTsCam: TimeInterval = 0
 
     private let s = AppState.shared
     private let bus = VideoBus.shared
@@ -60,18 +97,38 @@ final class VRRenderer: NSObject, MTKViewDelegate {
     private var M = matrix_identity_float3x3
     private var panelYaw: Float = 0
 
-    // 6DoF : position de la tete dans le monde (m), et point autour duquel
-    // le menu est pose. L'origine de recentrage efface la position et le
-    // lacet du moment ou l'on appuie sur RECENTRER.
+    // 6DoF : milieu des yeux (vue), camera (mains, passthrough), menu, origine
     private var tetePos = SIMD3<Float>(0, 0, 0)
+    private var camPos = SIMD3<Float>(0, 0, 0)
     private var panelCentre = SIMD3<Float>(0, 0, 0)
     private var origineLacet: Float = 0
     private var originePos = SIMD3<Float>(0, 0, 0)
     private var origineAFixer = true
     private var menuAvant = true
     private var rafraichLunettes: Float = 0
+    private var infoScene: Float = 0
+    private var dernierReglageLum: CFTimeInterval = 0
 
-    var onEtatChange: (() -> Void)?
+    // mains a dessiner : articulations + points le long des os, par main
+    private var mainsPts: [[Float]] = []
+    private var mainsOs: [[Float]] = []
+    private var mainsPince: [Bool] = []
+    private let osPaires: [(Int, Int)] = [
+        (0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
+        (9, 10), (10, 11), (11, 12), (13, 14), (14, 15), (15, 16),
+        (0, 17), (17, 18), (18, 19), (19, 20), (5, 9), (9, 13), (13, 17),
+    ]
+
+    /* La position d'ARKit est celle de la CAMERA du telephone, pas des yeux :
+       sur l'iPhone 13 mini, elle est ~5 cm a gauche, 2 cm plus haut et 6,5 cm
+       devant le milieu des yeux (camera dans le coin, puis epaisseur du
+       telephone + lentilles). La vue est placee au milieu des yeux, les mains
+       restent placees par la camera. */
+    private let oeilDepuisCamera = SIMD3<Float>(0.052, -0.018, 0.065)
+
+    /* Densite physique de l'ecran, pour centrer chaque image en face de sa
+       lentille. iOS ne la donne pas : on la lit dans une table par modele. */
+    private let ppi = VRRenderer.ppiAppareil()
 
     override init() {
         device = MTLCreateSystemDefaultDevice()!
@@ -82,12 +139,27 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         sd.sAddressMode = .clampToEdge; sd.tAddressMode = .clampToEdge
         sampler = device.makeSamplerState(descriptor: sd)!
 
+        let sc = MTLSamplerDescriptor()
+        sc.minFilter = .linear; sc.magFilter = .linear; sc.mipFilter = .linear
+        sc.sAddressMode = .repeat; sc.tAddressMode = .repeat
+        sc.maxAnisotropy = 4
+        samplerScene = device.makeSamplerState(descriptor: sc)!
+
         super.init()
+        s.charger()
+        // cote maximal des textures de scene selon la memoire : 4 Go -> 1024
+        let go = Double(ProcessInfo.processInfo.physicalMemory) / 1_000_000_000
+        s.plafondTex = go < 5 ? 1024 : (go < 7.5 ? 2048 : 4096)
+
         video = VideoBridge(device: device)
+        CVMetalTextureCacheCreate(nil, nil, device, nil, &cacheCam)
         construirePipelines()
         construireBuffers()
         texPanel = creerTextureVide(Panel.W, Panel.H)
         texCur = creerTextureVide(128, 128)
+        texBlanche = creerTextureVide(1, 1)
+        let blanc: [UInt8] = [255, 255, 255, 255]
+        texBlanche.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: blanc, bytesPerRow: 4)
         panel.onJouer = { [weak self] v in self?.jouer(v) }
         panel.onRecharger = { [weak self] in self?.chargerCatalogue() }
         panel.draw()
@@ -101,16 +173,35 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             prefs.set(appareil, forKey: "appareil")
         }
         s.appareil = appareil!
+        UIApplication.shared.isIdleTimerDisabled = true      // l'ecran ne se met pas en veille dans le casque
+    }
+
+    static func ppiAppareil() -> Float {
+        var u = utsname()
+        uname(&u)
+        let id = withUnsafePointer(to: &u.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(cString: $0) }
+        }
+        switch id {
+        case "iPhone13,1", "iPhone14,4": return 476                         // 12 mini, 13 mini
+        case "iPhone11,8", "iPhone12,1", "iPhone12,8", "iPhone14,6": return 326 // XR, 11, SE 2, SE 3
+        case "iPhone10,3", "iPhone10,6", "iPhone11,2", "iPhone11,4", "iPhone11,6",
+             "iPhone12,3", "iPhone12,5", "iPhone13,4", "iPhone14,3", "iPhone14,8",
+             "iPhone15,3", "iPhone15,5", "iPhone16,2", "iPhone17,4": return 458
+        default: return 460
+        }
     }
 
     private func construirePipelines() {
         let lib = device.makeDefaultLibrary()!
 
-        func pipeline(_ vs: String, _ fs: String, format: MTLPixelFormat, blend: Bool) -> MTLRenderPipelineState {
+        func pipeline(_ vs: String, _ fs: String, blend: Bool, profondeur: Bool,
+                      desc: MTLVertexDescriptor? = nil) -> MTLRenderPipelineState {
             let d = MTLRenderPipelineDescriptor()
             d.vertexFunction = lib.makeFunction(name: vs)
             d.fragmentFunction = lib.makeFunction(name: fs)
-            d.colorAttachments[0].pixelFormat = format
+            d.colorAttachments[0].pixelFormat = .bgra8Unorm
+            d.depthAttachmentPixelFormat = profondeur ? .depth32Float : .invalid
             if blend {
                 let a = d.colorAttachments[0]!
                 a.isBlendingEnabled = true
@@ -119,33 +210,53 @@ final class VRRenderer: NSObject, MTKViewDelegate {
                 a.sourceAlphaBlendFactor = .sourceAlpha
                 a.destinationAlphaBlendFactor = .oneMinusSourceAlpha
             }
-            if vs == "vsQuad" {
-                let vdesc = MTLVertexDescriptor()
-                vdesc.attributes[0].format = .float3
-                vdesc.attributes[0].offset = 0
-                vdesc.attributes[0].bufferIndex = 0
-                vdesc.attributes[1].format = .float2
-                vdesc.attributes[1].offset = MemoryLayout<Float>.size * 3
-                vdesc.attributes[1].bufferIndex = 0
-                vdesc.layouts[0].stride = MemoryLayout<Float>.size * 5
-                d.vertexDescriptor = vdesc
-            }
+            d.vertexDescriptor = desc
             return try! device.makeRenderPipelineState(descriptor: d)
         }
 
-        pEnv = pipeline("vsPlein", "fsEnv", format: .bgra8Unorm, blend: false)
-        pVid = pipeline("vsPlein", "fsVid", format: .bgra8Unorm, blend: false)
-        pQuad = pipeline("vsQuad", "fsQuad", format: .bgra8Unorm, blend: true)
-        pLens = pipeline("vsLens", "fsLens", format: .bgra8Unorm, blend: false)
+        let dQuad = MTLVertexDescriptor()
+        dQuad.attributes[0].format = .float3
+        dQuad.attributes[0].offset = 0
+        dQuad.attributes[0].bufferIndex = 0
+        dQuad.attributes[1].format = .float2
+        dQuad.attributes[1].offset = MemoryLayout<Float>.size * 3
+        dQuad.attributes[1].bufferIndex = 0
+        dQuad.layouts[0].stride = MemoryLayout<Float>.size * 5
+
+        let dScene = MTLVertexDescriptor()
+        dScene.attributes[0].format = .float3; dScene.attributes[0].bufferIndex = 0
+        dScene.attributes[1].format = .float3; dScene.attributes[1].bufferIndex = 1
+        dScene.attributes[2].format = .float2; dScene.attributes[2].bufferIndex = 2
+        dScene.layouts[0].stride = 12
+        dScene.layouts[1].stride = 12
+        dScene.layouts[2].stride = 8
+
+        pEnv = pipeline("vsPlein", "fsEnv", blend: false, profondeur: true)
+        pVid = pipeline("vsPlein", "fsVid", blend: false, profondeur: true)
+        pCam = pipeline("vsPlein", "fsCam", blend: false, profondeur: true)
+        pQuad = pipeline("vsQuad", "fsQuad", blend: true, profondeur: true, desc: dQuad)
+        pMain = pipeline("vsMain", "fsMain", blend: true, profondeur: true)
+        pScene = pipeline("vsScene", "fsScene", blend: false, profondeur: true, desc: dScene)
+        pSceneBlend = pipeline("vsScene", "fsScene", blend: true, profondeur: true, desc: dScene)
+        pLens = pipeline("vsLens", "fsLens", blend: false, profondeur: false)
+
+        let a = MTLDepthStencilDescriptor()
+        a.depthCompareFunction = .lessEqual; a.isDepthWriteEnabled = true
+        dsScene = device.makeDepthStencilState(descriptor: a)
+        let b = MTLDepthStencilDescriptor()
+        b.depthCompareFunction = .lessEqual; b.isDepthWriteEnabled = false
+        dsSceneBlend = device.makeDepthStencilState(descriptor: b)
+        let c = MTLDepthStencilDescriptor()
+        c.depthCompareFunction = .always; c.isDepthWriteEnabled = false
+        dsAucun = device.makeDepthStencilState(descriptor: c)
     }
 
     private func construireBuffers() {
         let quad: [Float] = [-1, -1, 1, -1, -1, 1, 1, 1]
         quadBuf = device.makeBuffer(bytes: quad, length: quad.count * 4)
 
-        // V invers (voir plus haut, deja corrige - le haut/bas du menu est
-        // maintenant bon). U invers ici en plus : le menu apparaissait en
-        // miroir gauche/droite (texte a l'envers comme dans un miroir).
+        // V invers (le haut/bas du menu est bon) ; U invers aussi : sans ca le
+        // menu apparaissait en miroir gauche/droite.
         let plan: [Float] = [
             -0.5, -0.5, 0, 1, 0,
              0.5, -0.5, 0, 0, 0,
@@ -161,7 +272,9 @@ final class VRRenderer: NSObject, MTKViewDelegate {
                 let (l, api) = try await Catalogue.charger()
                 panel.lib = l
                 s.apiUrl = api
-                s.info = l.isEmpty ? "catalogue vide" : "catalogue : \(l.count) videos"
+                let nScenes = l.filter { $0.estScene }.count
+                s.info = l.isEmpty ? "catalogue vide"
+                    : "catalogue : \(l.count - nScenes) videos" + (nScenes > 0 ? ", \(nScenes) scenes 3D" : "")
             } catch {
                 s.info = "catalogue : echec"
             }
@@ -171,11 +284,12 @@ final class VRRenderer: NSObject, MTKViewDelegate {
     }
 
     private func jouer(_ v: Video) {
+        SceneBus.shared.demandeFermeture = true
         bus.videoId = v.id
         bus.formatVideo = v.format
         bus.dejaCompte = false
         bus.demandeUrl = v.url
-        s.info = "regarde vers le bas pour revenir au menu"
+        s.info = "pincee longue paume vers toi : menu"
         s.infoT = 5
         s.menu = false
     }
@@ -186,6 +300,9 @@ final class VRRenderer: NSObject, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+        enVol.wait()
+        var envoye = false
+        defer { if !envoye { enVol.signal() } }
         guard let drawable = view.currentDrawable else { return }
         video.verifierDemandes()
 
@@ -194,7 +311,7 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         lastFrame = now
         let temps = Float(now - t0)
 
-        // lissage du quaternion
+        // lissage du quaternion (Core Motion : rotation seule, en secours)
         let k = 1 - pow(s.smooth * 0.92, dt * 60)
         var target = SIMD4<Float>(s.qtX, s.qtY, s.qtZ, s.qtW)
         if simd_dot(target, Q) < 0 { target = -target }
@@ -210,11 +327,7 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         let ww = ow * Q.w - oy * Q.y
         M = matFromQ(x, y, z, ww)
 
-        // Correction ciblee du lacet (gauche/droite) uniquement : une
-        // rotation supplementaire autour de Y ne touche jamais la
-        // composante Y des colonnes de M (verifie par calcul), donc le
-        // tangage et le roulis restent strictement inchanges. On applique
-        // -2*lacet pour inverser son signe sans rien recomposer d'autre.
+        // correction ciblee du lacet du capteur (voir l'historique : sens inverse)
         let yawBrut = atan2(M.columns.2.x, M.columns.2.z)
         let cy = cos(-2 * yawBrut), sy = sin(-2 * yawBrut)
         let correctionLacet = matrix_float3x3(columns: (
@@ -231,10 +344,12 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         s.dbgPitch = asin(min(max(M.columns.2.y * -1, -1), 1))
         s.dbgRoll = atan2(M.columns.0.y, M.columns.1.y)
 
-        if !s.menu && s.dbgPitch < -40 * .pi / 180 {
-            s.menu = true
-            panel.draw()
-        }
+        /* Gestes de la main : pincee longue paume vers soi -> menu ;
+           pincee courte -> clic sur la zone visee. Plus aucun menu au
+           mouvement de tete, ni au toucher de l'ecran. */
+        if s.basculerMenu { s.basculerMenu = false; s.menu.toggle(); panel.draw() }
+        if s.pinceClic { s.pinceClic = false; if s.menu { s.clickWanted = true } }
+
         if s.infoT > 0 {
             s.infoT -= dt
             if s.infoT <= 0 { s.info = ""; panel.draw() }
@@ -249,26 +364,58 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             panelYaw += (abs(diff) - dead) * (diff < 0 ? -1 : 1) * min(1, dt * 3.5)
         }
 
-        // Le menu reste fixe dans la piece (on peut s'en approcher, tourner
-        // autour), mais il revient vers la tete a l'ouverture, ou si l'on
-        // s'en eloigne de plus de 50 cm - meme principe de zone morte que
-        // pour le lacet juste au-dessus.
+        // le menu reste fixe dans la piece, mais revient vers la tete a
+        // l'ouverture ou si l'on s'en eloigne de plus de 50 cm
         if s.menu && !menuAvant { panelCentre = tetePos; panelYaw = yaw }
         menuAvant = s.menu
         let ecart = tetePos - panelCentre
         let dist = simd_length(ecart)
-        if dist > 0.5 {
-            panelCentre += ecart * ((dist - 0.5) / dist) * min(1, dt * 3)
-        }
+        if dist > 0.5 { panelCentre += ecart * ((dist - 0.5) / dist) * min(1, dt * 3) }
 
-        // onglet LUNETTES : les valeurs (angles, position 6DoF) changent en
-        // continu, on le redessine 4 fois par seconde
-        if s.menu && s.tab == "glasses" {
+        // onglet LUNETTES et telechargements : valeurs qui changent en continu
+        if s.menu && (s.tab == "glasses" || !SceneBus.shared.progres.isEmpty) {
             rafraichLunettes += dt
             if rafraichLunettes > 0.25 { rafraichLunettes = 0; s.besoinRedessin = true }
         }
+
+        // ---- scene 3D : ouverture, fermeture, animation ----
+        let sb = SceneBus.shared
+        if sb.demandeFermeture {
+            sb.demandeFermeture = false
+            scene?.liberer(); scene = nil
+        }
+        if let u = sb.demandeOuverture {
+            sb.demandeOuverture = nil
+            scene?.liberer()
+            let nouvelle = Scene3D(url: u, device: device, plafond: s.plafondTex)
+            nouvelle.demarrer()
+            scene = nouvelle
+            s.demandeRecentrage = true      // on demarre au point d'entree de la scene
+        }
+        if let sc = scene {
+            sc.animer()
+            infoScene += dt
+            if infoScene > 0.5 {
+                infoScene = 0
+                if let err = sc.erreur { s.info = "scene : " + err; s.infoT = 8; s.besoinRedessin = true }
+                else if sc.imagesTotal > 0 && sc.imagesFaites < sc.imagesTotal {
+                    s.info = "scene : textures \(sc.imagesFaites)/\(sc.imagesTotal)"; s.infoT = 2
+                    s.besoinRedessin = true
+                }
+            }
+        }
+
+        // luminosite fixe : iOS la reajuste parfois, on la reimpose chaque seconde
+        if now - dernierReglageLum > 1 {
+            dernierReglageLum = now
+            if abs(Float(UIScreen.main.brightness) - s.luminosite) > 0.02 {
+                UIScreen.main.brightness = CGFloat(s.luminosite)
+            }
+        }
+
         if s.besoinRedessin { s.besoinRedessin = false; panel.draw() }
         viser(dt: dt)
+        preparerMains()
 
         if panel.dirty, let img = panel.image, let texPanel {
             mettreAJour(texPanel, avec: img)
@@ -276,30 +423,56 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         }
         dessinerCurseur()
 
-        let ew = viewW / 2, eh = viewH
+        /* Chaque image est centree en face de sa lentille : centres a
+           +- ecartLentilles/2 du milieu de l'ecran, en pixels physiques. */
+        let w = Int(view.drawableSize.width), h = Int(view.drawableSize.height), demi = w / 2
+        // pixels de rendu par mm : le rendu (x3) est reduit a l'ecran reel (x2,88 sur un mini)
+        let pxParPoint = Float(view.drawableSize.width / max(view.bounds.width, 1))
+        let pxParMm = ppi / 25.4 * pxParPoint / max(Float(UIScreen.main.nativeScale), 1)
+        var ew = demi, x0G = 0, x0D = demi
+        let sep = Int(s.ecartLentilles * pxParMm)
+        if sep > 0 && w > 0 {
+            ew = min(sep, demi)
+            x0G = max(0, demi - sep / 2 - ew / 2)
+            x0D = min(w - ew, demi + sep / 2 - ew / 2)
+        }
+        let eh = h
         if ew != fboW || eh != fboH, ew > 0, eh > 0 {
             fboW = ew; fboH = eh
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: ew, height: eh, mipmapped: false)
             d.usage = [.renderTarget, .shaderRead]
             fboTex = device.makeTexture(descriptor: d)
+            let dp = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .depth32Float, width: ew, height: eh, mipmapped: false)
+            dp.usage = [.renderTarget]
+            dp.storageMode = .memoryless      // profondeur jamais relue : reste dans la puce graphique
+            fboProf = device.makeTexture(descriptor: dp)
         }
 
-        guard let cmd = queue.makeCommandBuffer(), let fbo = fboTex, ew > 0, eh > 0 else { return }
+        guard let cmd = queue.makeCommandBuffer(), let fbo = fboTex, let prof = fboProf, ew > 0, eh > 0 else { return }
 
         if let nouvelle = video.texturePourFrame() {
             texVidCourante = nouvelle
         }
 
-        renderOeil(cmd: cmd, drawable: drawable.texture, signe: -1, ew: ew, eh: eh, temps: temps, fbo: fbo, premier: true)
-        renderOeil(cmd: cmd, drawable: drawable.texture, signe: 1, ew: ew, eh: eh, temps: temps, fbo: fbo, premier: false)
+        renderOeil(cmd: cmd, drawable: drawable.texture, signe: -1, ew: ew, eh: eh, x0: x0G, temps: temps, fbo: fbo, prof: prof, premier: true)
+        renderOeil(cmd: cmd, drawable: drawable.texture, signe: 1, ew: ew, eh: eh, x0: x0D, temps: temps, fbo: fbo, prof: prof, premier: false)
 
+        // les textures camera doivent vivre jusqu'a la fin du travail du GPU
+        let gardeY = camY, gardeUV = camUV
+        let sema = enVol
+        cmd.addCompletedHandler { _ in
+            _ = gardeY; _ = gardeUV
+            sema.signal()
+        }
+        envoye = true
         cmd.present(drawable)
         cmd.commit()
     }
 
     private var texVidCourante: MTLTexture?
 
-    private func renderOeil(cmd: MTLCommandBuffer, drawable: MTLTexture, signe: Float, ew: Int, eh: Int, temps: Float, fbo: MTLTexture, premier: Bool) {
+    private func renderOeil(cmd: MTLCommandBuffer, drawable: MTLTexture, signe: Float, ew: Int, eh: Int, x0: Int,
+                            temps: Float, fbo: MTLTexture, prof: MTLTexture, premier: Bool) {
         let asp = Float(ew) / Float(eh)
         let ipd = s.ipd / 1000
         let ex = signe * ipd / 2
@@ -310,24 +483,34 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             SIMD4(M.columns.0.z, M.columns.1.z, M.columns.2.z, 0),
             SIMD4(-ex, 0, 0, 1)
         ))
-        // Position de la tete : on deplace la camera de -(M^T * tetePos),
-        // soit la position exprimee dans le repere de la tete. Sans 6DoF,
-        // tetePos vaut 0 et la vue est identique a avant.
+        // position de la tete : camera deplacee de -(M^T * tetePos)
         let a = simd_transpose(M) * tetePos
         view.columns.3 = SIMD4(-ex - a.x, -a.y, -a.z, 1)
         let oeilMonde = tetePos + M * SIMD3<Float>(ex, 0, 0)
         let VP = proj * view
 
-        // ---- passe hors-ecran : decor ou video, puis panneau + curseur ----
+        // ---- passe hors-ecran : fond, puis menu + curseur + mains ----
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = fbo
         rp.colorAttachments[0].loadAction = .clear
         rp.colorAttachments[0].storeAction = .store
         rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        rp.depthAttachment.texture = prof
+        rp.depthAttachment.loadAction = .clear
+        rp.depthAttachment.storeAction = .dontCare
+        rp.depthAttachment.clearDepth = 1
         guard let enc = cmd.makeRenderCommandEncoder(descriptor: rp) else { return }
         enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(ew), height: Double(eh), znear: 0, zfar: 1))
+        enc.setDepthStencilState(dsAucun)
 
-        if bus.enLecture, let texVid = texVidCourante {
+        if let sc = scene, !bus.enLecture {
+            // scene 3D : la pluie de code sert de ciel derriere les fenetres
+            dessinerDecor(enc, asp: asp, oeil: oeilMonde, temps: temps)
+            sc.dessiner(enc, opaque: pScene, transparent: pSceneBlend, dsOpaque: dsScene, dsTransparent: dsSceneBlend,
+                        sampler: samplerScene, blanche: texBlanche, vp: VP, oeil: oeilMonde)
+            enc.setDepthStencilState(dsAucun)
+            enc.setCullMode(.none)
+        } else if bus.enLecture, let texVid = texVidCourante {
             enc.setRenderPipelineState(pVid)
             enc.setVertexBuffer(quadBuf, offset: 0, index: 0)
             let vty = tan(s.fov * .pi / 360)
@@ -345,23 +528,31 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(texVid, index: 0)
             enc.setFragmentSamplerState(sampler, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        } else {
-            enc.setRenderPipelineState(pEnv)
+        } else if s.passthrough, camOk, let y = camY.flatMap({ CVMetalTextureGetTexture($0) }),
+                  let uv = camUV.flatMap({ CVMetalTextureGetTexture($0) }) {
+            // accueil : le monde reel, vu par la camera arriere
+            enc.setRenderPipelineState(pCam)
             enc.setVertexBuffer(quadBuf, offset: 0, index: 0)
             let ty = tan(s.fov * .pi / 360)
-            var u = EnvUniforms(uRot: simd_float4x4(M), uTan: SIMD2(ty * asp, ty), uEye: oeilMonde, uT: temps)
-            enc.setFragmentBytes(&u, length: MemoryLayout<EnvUniforms>.stride, index: 0)
+            var u = CamUniforms(uTan: SIMD2(ty * asp, ty), uZoom: s.zoomPt, pad: 0, uK: camK)
+            enc.setFragmentBytes(&u, length: MemoryLayout<CamUniforms>.stride, index: 0)
+            enc.setFragmentTexture(y, index: 0)
+            enc.setFragmentTexture(uv, index: 1)
+            enc.setFragmentSamplerState(sampler, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        } else {
+            dessinerDecor(enc, asp: asp, oeil: oeilMonde, temps: temps)
         }
 
-        if s.menu, let texPanel {
-            let ps = panelSize()
-            let c = cos(panelYaw), sn = sin(panelYaw)
-            let U = SIMD3<Float>(c, 0, -sn)
-            let V = SIMD3<Float>(0, 1, 0)
-            let N = SIMD3<Float>(sn, 0, c)
-            let P = panelCentre + SIMD3<Float>(-sn * s.menuDist, 0, -c * s.menuDist)
+        let ps = panelSize()
+        let c = cos(panelYaw), sn = sin(panelYaw)
+        let U = SIMD3<Float>(c, 0, -sn)
+        let V = SIMD3<Float>(0, 1, 0)
+        let N = SIMD3<Float>(sn, 0, c)
+        let P = panelCentre + SIMD3<Float>(-sn * s.menuDist, 0, -c * s.menuDist)
+        let rs = 2 * s.menuDist * tan(3 * Float.pi / 180)
 
+        if s.menu, let texPanel {
             enc.setRenderPipelineState(pQuad)
             enc.setVertexBuffer(planBuf, offset: 0, index: 0)
             var mvp = VP * quadMat(U, V, N, P, ps.0, ps.1)
@@ -373,13 +564,10 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
 
             if let texCur {
-                let rs = 2 * s.menuDist * tan(3 * Float.pi / 180)
+                // curseur pose sur le menu, la ou le regard le touche
                 let cx = (s.curU - 0.5) * ps.0
                 let cy = (0.5 - s.curV) * ps.1
-                let CP = SIMD3<Float>(
-                    P.x + U.x * cx + V.x * cy + N.x * 0.012,
-                    P.y + U.y * cx + V.y * cy + N.y * 0.012,
-                    P.z + U.z * cx + V.z * cy + N.z * 0.012)
+                let CP = P + U * cx + V * cy + N * 0.012
                 var mvpC = VP * quadMat(U, V, N, CP, rs, rs)
                 enc.setVertexBytes(&mvpC, length: MemoryLayout<simd_float4x4>.stride, index: 1)
                 var alphaC: Float = 0.95
@@ -387,17 +575,55 @@ final class VRRenderer: NSObject, MTKViewDelegate {
                 enc.setFragmentTexture(texCur, index: 0)
                 enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             }
+        } else if s.pince || s.progresMenu > 0.01, let texCur {
+            /* Menu cache : le curseur n'apparait que pendant une pincee, au
+               centre du regard, pour montrer l'anneau de la pincee longue. */
+            enc.setRenderPipelineState(pQuad)
+            enc.setVertexBuffer(planBuf, offset: 0, index: 0)
+            let CP = tetePos - M.columns.2 * s.menuDist
+            var mvpC = VP * quadMat(M.columns.0, M.columns.1, M.columns.2, CP, rs, rs)
+            enc.setVertexBytes(&mvpC, length: MemoryLayout<simd_float4x4>.stride, index: 1)
+            var alphaC: Float = 0.95
+            enc.setFragmentBytes(&alphaC, length: 4, index: 0)
+            enc.setFragmentTexture(texCur, index: 0)
+            enc.setFragmentSamplerState(sampler, index: 0)
+            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+
+        // les mains reconnues, par-dessus tout (scene, video, menu)
+        if !mainsPts.isEmpty {
+            let vpMain: simd_float4x4
+            if scene == nil && !bus.enLecture && s.passthrough && camOk {
+                /* En passthrough, l'image vient de la seule camera, sans relief :
+                   la main est dessinee depuis la camera elle-meme (meme vue pour
+                   les deux yeux, meme agrandissement) pour tomber exactement sur
+                   l'image de la vraie main. */
+                let tz = tan(s.fov * .pi / 360) / s.zoomPt
+                let pz = perspective(2 * atan(tz), asp, 0.05, 100)
+                var vc = simd_float4x4(columns: (
+                    SIMD4(M.columns.0.x, M.columns.1.x, M.columns.2.x, 0),
+                    SIMD4(M.columns.0.y, M.columns.1.y, M.columns.2.y, 0),
+                    SIMD4(M.columns.0.z, M.columns.1.z, M.columns.2.z, 0),
+                    SIMD4(0, 0, 0, 1)
+                ))
+                let cc = simd_transpose(M) * camPos
+                vc.columns.3 = SIMD4(-cc.x, -cc.y, -cc.z, 1)
+                vpMain = pz * vc
+            } else {
+                vpMain = VP      // scenes, videos : vrai relief, depuis chaque oeil
+            }
+            dessinerMains(enc, vp: vpMain, eh: eh)
         }
         enc.endEncoding()
 
-        // ---- passe de composition : distorsion barillet vers la moitie d'ecran ----
+        // ---- passe de composition : distorsion barillet vers la zone de la lentille ----
         let rpF = MTLRenderPassDescriptor()
         rpF.colorAttachments[0].texture = drawable
         rpF.colorAttachments[0].loadAction = premier ? .clear : .load
         rpF.colorAttachments[0].storeAction = .store
         rpF.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         guard let encF = cmd.makeRenderCommandEncoder(descriptor: rpF) else { return }
-        encF.setViewport(MTLViewport(originX: signe < 0 ? 0 : Double(ew), originY: 0, width: Double(ew), height: Double(eh), znear: 0, zfar: 1))
+        encF.setViewport(MTLViewport(originX: Double(x0), originY: 0, width: Double(ew), height: Double(eh), znear: 0, zfar: 1))
         encF.setRenderPipelineState(pLens)
         encF.setVertexBuffer(quadBuf, offset: 0, index: 0)
         var lu = LensUniforms(uK1: -s.k1, uAsp: asp)
@@ -408,18 +634,143 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         encF.endEncoding()
     }
 
-    /* Contexte reutilise d'une frame a l'autre - eviter de reallouer un
-       bitmap Core Graphics 60 fois par seconde (c'etait la premiere
-       moitie du ralentissement observe, surtout visible pendant la
-       selection puisque le curseur se redessine a chaque frame). */
+    // decor : pluie de code + sol quadrille, calcules dans le shader
+    private func dessinerDecor(_ enc: MTLRenderCommandEncoder, asp: Float, oeil: SIMD3<Float>, temps: Float) {
+        enc.setRenderPipelineState(pEnv)
+        enc.setDepthStencilState(dsAucun)
+        enc.setVertexBuffer(quadBuf, offset: 0, index: 0)
+        let ty = tan(s.fov * .pi / 360)
+        var u = EnvUniforms(uRot: simd_float4x4(M), uTan: SIMD2(ty * asp, ty), uEye: oeil, uT: temps)
+        enc.setFragmentBytes(&u, length: MemoryLayout<EnvUniforms>.stride, index: 0)
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+
+    // squelette des mains : os en petits points clairs, articulations en pastilles bleues
+    private func dessinerMains(_ enc: MTLRenderCommandEncoder, vp: simd_float4x4, eh: Int) {
+        enc.setRenderPipelineState(pMain)
+        enc.setDepthStencilState(dsAucun)
+        let focale = Float(eh) / (2 * tan(s.fov * .pi / 360))
+        for h in 0..<mainsPts.count {
+            var u = MainUniforms(vp: vp, col: SIMD4(0.80, 0.93, 1, 0.8), taille: 0.008 * focale)
+            let os = mainsOs[h]
+            os.withUnsafeBytes { enc.setVertexBytes($0.baseAddress!, length: $0.count, index: 0) }
+            enc.setVertexBytes(&u, length: MemoryLayout<MainUniforms>.stride, index: 1)
+            enc.setFragmentBytes(&u, length: MemoryLayout<MainUniforms>.stride, index: 1)
+            enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: os.count / 3)
+
+            u.col = SIMD4(0.25, 0.78, 0.93, 1); u.taille = 0.014 * focale
+            let pts = mainsPts[h]
+            pts.withUnsafeBytes { enc.setVertexBytes($0.baseAddress!, length: $0.count, index: 0) }
+            enc.setVertexBytes(&u, length: MemoryLayout<MainUniforms>.stride, index: 1)
+            enc.setFragmentBytes(&u, length: MemoryLayout<MainUniforms>.stride, index: 1)
+            enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 21)
+
+            if mainsPince[h] {
+                // cette main pince : bouts du pouce et de l'index en orange
+                let bouts: [Float] = [pts[12], pts[13], pts[14], pts[24], pts[25], pts[26]]
+                u.col = SIMD4(0.91, 0.77, 0.35, 1)
+                bouts.withUnsafeBytes { enc.setVertexBytes($0.baseAddress!, length: $0.count, index: 0) }
+                enc.setVertexBytes(&u, length: MemoryLayout<MainUniforms>.stride, index: 1)
+                enc.setFragmentBytes(&u, length: MemoryLayout<MainUniforms>.stride, index: 1)
+                enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 2)
+            }
+        }
+    }
+
+    // mains a dessiner cette image : deja placees dans la piece et lissees par Mains
+    private func preparerMains() {
+        mainsPts.removeAll(); mainsOs.removeAll(); mainsPince.removeAll()
+        let (mondes, tempsM) = mains.lire()
+        guard CACurrentMediaTime() - tempsM < 0.3 else { return }
+        for d in mondes.prefix(2) where d.count >= 64 {
+            let pts = Array(d[0..<63])
+            var os: [Float] = []
+            os.reserveCapacity(osPaires.count * 5 * 3)
+            for (a, b) in osPaires {
+                for k in 1...5 {
+                    let f = Float(k) / 6
+                    for c in 0..<3 { os.append(pts[a * 3 + c] + (pts[b * 3 + c] - pts[a * 3 + c]) * f) }
+                }
+            }
+            mainsPts.append(pts); mainsOs.append(os); mainsPince.append(d[63] > 0.5)
+        }
+    }
+
+    // ---------- 6DoF, image camera, mains ----------
+    private func poseTete(dt: Float) {
+        // la camera sert au 6DoF, aux mains et au passthrough
+        if (s.mode6dof || s.mains || s.passthrough) && ArTracker.disponible { ar.start() } else { ar.stop() }
+
+        if s.mode6dof, ArTracker.disponible, let p = ar.pose() {
+            let lacetBrut = atan2(p.rotation.columns.2.x, p.rotation.columns.2.z)
+            if origineAFixer || s.demandeRecentrage {
+                origineLacet = lacetBrut
+                originePos = p.position
+                origineAFixer = false
+                s.demandeRecentrage = false
+            }
+            // rotation de -origineLacet autour de Y : le regard au moment du recentrage devient -Z
+            let c = cos(-origineLacet), sn = sin(-origineLacet)
+            let ry = matrix_float3x3(columns: (
+                SIMD3(c, 0, -sn),
+                SIMD3(0, 1, 0),
+                SIMD3(sn, 0, c)
+            ))
+            M = ry * p.rotation
+            camPos = ry * (p.position - originePos)
+            tetePos = camPos + M * oeilDepuisCamera
+            s.pos6dof = true
+            s.etat6dof = p.etat
+            s.posX = tetePos.x; s.posY = tetePos.y; s.posZ = tetePos.z
+        } else {
+            s.pos6dof = false
+            if !s.mode6dof { s.etat6dof = "6DOF DESACTIVE (ROTATION SEULE)"; origineAFixer = true }
+            else if !ArTracker.disponible { s.etat6dof = "6DOF NON SUPPORTE SUR CET APPAREIL" }
+            else { s.etat6dof = "6DOF : CAMERA INDISPONIBLE (ROTATION SEULE)" }
+            tetePos = .zero; camPos = .zero
+        }
+
+        // ---- image camera : passthrough, puis detection des mains ----
+        if let f = ar.frame, f.timestamp != dernierTsCam {
+            dernierTsCam = f.timestamp
+            majTexturesCamera(f)
+            if s.mains && mains.libre && camOk {
+                mains.traiter(f.capturedImage, pose: Mains.Pose(
+                    fx: camK.x, fy: camK.y, cx: camK.z, cy: camK.w, aspect: camAspect, cam: camPos, rot: M))
+            }
+        }
+        let actives = s.mains && CACurrentMediaTime() - mains.derniereAnalyse < 2
+        if s.mainsOk != actives { s.mainsOk = actives; s.besoinRedessin = true }
+        if !s.mains { s.etatMains = "MAINS DESACTIVEES" }
+        else if !actives { s.etatMains = "MAINS : CAMERA INACTIVE" }
+    }
+
+    private func majTexturesCamera(_ f: ARFrame) {
+        guard let cache = cacheCam else { return }
+        let pb = f.capturedImage
+        guard CVPixelBufferGetPlaneCount(pb) >= 2 else { camOk = false; return }
+        var y: CVMetalTexture?
+        var uv: CVMetalTexture?
+        CVMetalTextureCacheCreateTextureFromImage(nil, cache, pb, nil, .r8Unorm,
+            CVPixelBufferGetWidthOfPlane(pb, 0), CVPixelBufferGetHeightOfPlane(pb, 0), 0, &y)
+        CVMetalTextureCacheCreateTextureFromImage(nil, cache, pb, nil, .rg8Unorm,
+            CVPixelBufferGetWidthOfPlane(pb, 1), CVPixelBufferGetHeightOfPlane(pb, 1), 1, &uv)
+        camY = y; camUV = uv
+        let res = f.camera.imageResolution
+        let K = f.camera.intrinsics
+        let W = Float(res.width), H = Float(res.height)
+        camK = SIMD4(K[0][0] / W, K[1][1] / H, K[2][0] / W, K[2][1] / H)
+        camAspect = W / H
+        camOk = y != nil && uv != nil
+    }
+
+    /* Contexte reutilise d'une frame a l'autre (pas de bitmap realloue 60
+       fois par seconde). Retournement applique une seule fois. */
     private lazy var cursorCtx: CGContext = {
         let ctx = CGContext(
             data: nil, width: 128, height: 128, bitsPerComponent: 8, bytesPerRow: 128 * 4,
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         )!
-        // Retournement applique une seule fois ici (pas a chaque frame,
-        // sinon la transformation s'accumulerait) pour retrouver les
-        // coordonnees haut-gauche d'UIKit qu'attend le dessin ci-dessous.
         ctx.translateBy(x: 0, y: 128)
         ctx.scaleBy(x: 1, y: -1)
         return ctx
@@ -437,19 +788,20 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         ctx.setStrokeColor(col.cgColor)
         ctx.setLineWidth(5)
         ctx.strokeEllipse(in: CGRect(x: 42, y: 42, width: 44, height: 44))
-        if s.dwell > 0.01 {
-            let path = UIBezierPath(arcCenter: CGPoint(x: 64, y: 64), radius: 50, startAngle: -.pi / 2, endAngle: -(.pi / 2) + 2 * .pi * CGFloat(s.dwell), clockwise: true)
-            // UIBezierPath a sa propre epaisseur de trait, independante de
-            // ctx.setLineWidth() qui ne s'applique qu'aux traces directs
-            // sur le CGContext (comme strokeEllipse juste au-dessus) -
-            // c'est pour ca que l'anneau restait fin malgre le changement
-            // precedent.
+        // anneau : pincee longue vers le menu (orange), ou fixation de secours (bleu)
+        let anneau = s.progresMenu > 0.01 ? s.progresMenu : s.dwell
+        if anneau > 0.01 {
+            let path = UIBezierPath(arcCenter: CGPoint(x: 64, y: 64), radius: 50, startAngle: -.pi / 2,
+                                    endAngle: -(.pi / 2) + 2 * .pi * CGFloat(anneau), clockwise: true)
             path.lineWidth = 14
-            UIColor(red: 63/255, green: 199/255, blue: 238/255, alpha: 1).setStroke()
+            (s.progresMenu > 0.01 ? UIColor(red: 232/255, green: 196/255, blue: 90/255, alpha: 1)
+                                  : UIColor(red: 63/255, green: 199/255, blue: 238/255, alpha: 1)).setStroke()
             path.stroke()
         }
         ctx.setFillColor(col.cgColor)
-        ctx.fillEllipse(in: CGRect(x: 59, y: 59, width: 10, height: 10))
+        // pincee en cours : le point central grossit, comme un bouton enfonce
+        let r: CGFloat = s.pince ? 12 : 5
+        ctx.fillEllipse(in: CGRect(x: 64 - r, y: 64 - r, width: 2 * r, height: 2 * r))
         UIGraphicsPopContext()
         guard let data = ctx.data else { return }
         tex.replace(region: MTLRegionMake2D(0, 0, 128, 128), mipmapLevel: 0, withBytes: data, bytesPerRow: 128 * 4)
@@ -461,12 +813,6 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         return device.makeTexture(descriptor: desc)!
     }
 
-    /* Contexte reutilise d'une frame a l'autre, comme cursorCtx : le
-       clavier appelait mettreAJour() a chaque lettre tapee, et cette
-       fonction reallouait un bitmap de 1180x720 (~3,4 Mo) a chaque fois -
-       c'etait le nouveau point chaud une fois l'allocation de texture
-       Metal elle-meme corrigee. Retournement applique une seule fois a
-       la creation, comme pour cursorCtx. */
     private lazy var panelCtx: CGContext = {
         let ctx = CGContext(
             data: nil, width: Panel.W, height: Panel.H, bitsPerComponent: 8, bytesPerRow: Panel.W * 4,
@@ -481,96 +827,39 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         let w = tex.width, h = tex.height
         let bytesPerRow = w * 4
         let ctx = panelCtx
-        // Sans ce clear, le fond semi-transparent du menu (alpha 0.91)
-        // se composite par-dessus TOUTES les images precedentes jamais
-        // dessinees dans ce contexte reutilise, au lieu de les remplacer -
-        // c'etait la vraie cause du clavier "qui ne se ferme pas" (l'etat
-        // changeait bien, mais le visuel affichait un mélange incoherent
-        // d'anciennes frames).
+        // sans ce clear, le fond semi-transparent du menu se superposait aux images precedentes
         ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
         ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
         guard let data = ctx.data else { return }
         tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: data, bytesPerRow: bytesPerRow)
     }
 
-    // ---------- 6DoF ----------
-    /* Remplace M (rotation Core Motion) par la pose ARKit quand le suivi
-       camera est disponible, et renseigne tetePos. Sinon, rotation seule :
-       tetePos = 0, le rendu est exactement celui d'avant. */
-    private func poseTete(dt: Float) {
-        guard s.mode6dof else {
-            ar.stop()
-            s.pos6dof = false; s.etat6dof = "6DOF DESACTIVE (ROTATION SEULE)"
-            tetePos = .zero; origineAFixer = true
-            return
-        }
-        guard ArTracker.disponible else {
-            s.pos6dof = false; s.etat6dof = "6DOF NON SUPPORTE SUR CET APPAREIL"
-            tetePos = .zero
-            return
-        }
-        ar.start()
-        guard let p = ar.pose() else {
-            s.pos6dof = false; s.etat6dof = "6DOF : CAMERA INDISPONIBLE (ROTATION SEULE)"
-            tetePos = .zero
-            return
-        }
-        let lacetBrut = atan2(p.rotation.columns.2.x, p.rotation.columns.2.z)
-        if origineAFixer || s.demandeRecentrage {
-            origineLacet = lacetBrut
-            originePos = p.position
-            origineAFixer = false
-            s.demandeRecentrage = false
-        }
-        // rotation de -origineLacet autour de Y (meme forme que
-        // correctionLacet) : le regard au moment du recentrage devient -Z.
-        let c = cos(-origineLacet), sn = sin(-origineLacet)
-        let ry = matrix_float3x3(columns: (
-            SIMD3(c, 0, -sn),
-            SIMD3(0, 1, 0),
-            SIMD3(sn, 0, c)
-        ))
-        M = ry * p.rotation
-        tetePos = ry * (p.position - originePos)
-        s.pos6dof = true
-        s.etat6dof = p.etat
-        s.posX = tetePos.x; s.posY = tetePos.y; s.posZ = tetePos.z
-    }
-
-    // ---------- visee (curseur base sur le regard) ----------
+    // ---------- visee (curseur au centre du regard) ----------
     private func viser(dt: Float) {
         if !s.menu { s.hot = -1; return }
         let ps = panelSize()
-        let f = SIMD3<Float>(-M.columns.2.x, -M.columns.2.y, -M.columns.2.z)
+        let f = -M.columns.2
         let c = cos(panelYaw), sn = sin(panelYaw)
         let N = SIMD3<Float>(sn, 0, c)
         let P = panelCentre + SIMD3<Float>(-sn * s.menuDist, 0, -c * s.menuDist)
-        // Le rayon du regard part de la tete (tetePos), plus de l'origine.
+        // le rayon du regard part du milieu des yeux
         let O = tetePos
-        let den = f.x * N.x + f.y * N.y + f.z * N.z
+        let den = simd_dot(f, N)
         if den < -1e-4 {
             let t = simd_dot(P - O, N) / den
             if t > 0 {
                 let h = O + f * t - P
-                let hx = h.x, hy2 = h.y, hz = h.z
-                let lu = hx * c + hz * (-sn)
-                let lv = hy2
-                // sensGaze amplifie le deplacement du curseur sans changer
-                // la taille visuelle du menu (ps.0/ps.1, utilise ailleurs
-                // pour le rendu) : moins besoin de tourner la tete pour
-                // aller d'un bout a l'autre.
-                s.curU = min(max(lu * s.sensGaze / ps.0 + 0.5, 0), 1)
-                s.curV = min(max(0.5 - lv * s.sensGaze / ps.1, 0), 1)
+                let lu = h.x * c + h.z * (-sn)
+                let lv = h.y
+                /* Le curseur est exactement la ou le regard touche le menu :
+                   aucune amplification, il suit la tete a l'identique. */
+                s.curU = min(max(lu / ps.0 + 0.5, 0), 1)
+                s.curV = min(max(0.5 - lv / ps.1, 0), 1)
             }
         }
 
         var trouve = -1
-        // (1 - curU) et pas curU : le mapping U du quad a ete invers pour
-        // corriger l'affichage en miroir (voir construireBuffers), mais ce
-        // calcul de detection n'avait jamais ete mis a jour en consequence
-        // - ce qui visait a gauche testait en realite les zones de droite,
-        // et inversement. C'est la vraie cause des lettres qui ne
-        // correspondaient jamais a la bonne touche.
+        // (1 - curU) : le mapping U du quad est inverse (voir construireBuffers)
         let px = (1 - CGFloat(s.curU)) * CGFloat(Panel.W), py = CGFloat(s.curV) * CGFloat(Panel.H)
         for (i, z) in panel.zones.enumerated() {
             if px >= z.rect.minX, px <= z.rect.maxX, py >= z.rect.minY, py <= z.rect.maxY {
@@ -578,21 +867,18 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             }
         }
         if trouve != s.hot {
-            // Le clic en attente ne doit jamais s'appliquer a une AUTRE
-            // zone que celle deja visee au moment du clic - sinon une
-            // micro-secousse de la tete au moment d'appuyer sur le bouton
-            // de la souris (physiquement plausible) fait basculer la cible
-            // juste avant que le clic ne soit traite, et l'action tombe
-            // sur la case voisine (ex : viser B, cliquer, la tete devie
-            // legerement vers V au meme instant -> V est active).
+            // un clic en attente ne doit jamais tomber sur une AUTRE zone
             s.hot = trouve; s.dwell = 0; s.clickWanted = false; panel.draw()
         } else if trouve >= 0 {
             if s.clickWanted {
                 s.clickWanted = false; s.dwell = 0
                 panel.agir(panel.zones[trouve].id)
-            } else {
+            } else if !s.mainsOk {
+                // fixation : SECOURS seulement, quand les mains ne sont pas suivies
                 s.dwell += dt / 1.2
                 if s.dwell >= 1 { s.dwell = 0; panel.agir(panel.zones[trouve].id) }
+            } else {
+                s.dwell = 0
             }
         }
         s.clickWanted = false
@@ -629,11 +915,6 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             SIMD4(N.x, N.y, N.z, 0),
             SIMD4(P.x, P.y, P.z, 1)
         ))
-    }
-
-    // ---------- entrees ----------
-    func tap() {
-        if !s.menu { s.menu = true } else { s.clickWanted = true }
     }
 }
 

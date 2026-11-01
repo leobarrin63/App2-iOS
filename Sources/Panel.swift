@@ -3,9 +3,7 @@ import UIKit
 /* Equivalent de la classe Panel dans MainActivity.kt (Android) : dessine
    le menu sur un bitmap (via UIGraphicsImageRenderer, l'equivalent iOS
    du Canvas 2D Android), colle ensuite comme texture sur un quad 3D par
-   le renderer. Simplifie par rapport a Android sur un point : la
-   recherche texte passe par un vrai champ de texte SwiftUI en surimpression
-   plutot qu'une saisie clavier custom dans le menu 3D. */
+   le renderer. La recherche se tape sur le clavier virtuel du menu. */
 final class Panel {
     static let W = 1180
     static let H = 720
@@ -105,7 +103,7 @@ final class Panel {
             ctx.strokePath()
             bouton(ctx, "hide", 40, CGFloat(Panel.H) - 80, 240, 56, "MASQUER", taille: 20)
             bouton(ctx, "recenter", 300, CGFloat(Panel.H) - 80, 240, 56, "RECENTRER", taille: 20)
-            bouton(ctx, "stop", 560, CGFloat(Panel.H) - 80, 240, 56, "DECOR", taille: 20)
+            bouton(ctx, "stop", 560, CGFloat(Panel.H) - 80, 240, 56, "ACCUEIL", taille: 20)
             if !s.info.isEmpty {
                 txt(s.info, CGFloat(Panel.W) - 40, CGFloat(Panel.H) - 30, 18, UIColor(red: 232/255, green: 196/255, blue: 90/255, alpha: 1), droite: true)
             }
@@ -159,11 +157,29 @@ final class Panel {
             rect(ctx, 40, y, 1050, hl, 12, fill: couleurFond(false, chaud), stroke: couleurBord(false, chaud))
             let teinte = UIColor(hue: CGFloat(v.teinte) / 360, saturation: 0.48, brightness: 0.4, alpha: 1)
             rect(ctx, 54, y + 8, 108, hl - 16, 6, fill: teinte, stroke: nil)
+            txt(v.estScene ? "3D" : "360", 150, y + hl - 14, 12, UIColor(white: 1, alpha: 0.7), droite: true, mono: true)
             txt(v.nom, 178, y + 30, 21, .white, gras: true)
-            let d = v.duree >= 60 ? "\(v.duree / 60) min" : "\(v.duree) s"
             let vues = v.vues >= 1000 ? "\(v.vues / 1000) k vues" : "\(v.vues) vues"
-            txt("\(vues) - \(d)", 178, y + 54, 16, UIColor(white: 1, alpha: 0.55), mono: true)
-            if v.lectures > 0 {
+            if v.estScene {
+                // scene 3D : ou en est le fichier sur le telephone
+                txt("\(vues) - scene 3D 6DoF - " + SceneBus.mo(v.taille), 178, y + 54, 16,
+                    UIColor(white: 1, alpha: 0.55), mono: true)
+                let bus = SceneBus.shared
+                let orange = UIColor(red: 232/255, green: 196/255, blue: 90/255, alpha: 1)
+                if let pr = bus.progres[v.id] {
+                    txt("\(Int(pr * 100)) %", 1068, y + hl / 2 + 7, 18, orange, droite: true, gras: true)
+                    rect(ctx, 178, y + hl - 8, 860, 4, 2, fill: UIColor(white: 1, alpha: 0.15), stroke: nil)
+                    rect(ctx, 178, y + hl - 8, 860 * CGFloat(pr), 4, 2, fill: orange, stroke: nil)
+                } else if bus.presente(v) {
+                    txt("PRETE", 1068, y + hl / 2 + 7, 18, UIColor(red: 91/255, green: 214/255, blue: 164/255, alpha: 1), droite: true, gras: true)
+                } else {
+                    txt("TELECHARGER", 1068, y + hl / 2 + 7, 18, UIColor(red: 63/255, green: 199/255, blue: 238/255, alpha: 1), droite: true, gras: true)
+                }
+            } else {
+                let d = v.duree >= 60 ? "\(v.duree / 60) min" : "\(v.duree) s"
+                txt("\(vues) - \(d)", 178, y + 54, 16, UIColor(white: 1, alpha: 0.55), mono: true)
+            }
+            if v.lectures > 0 && !v.estScene {
                 txt("vu \(v.lectures)x", 1068, y + hl / 2 + 5, 15, UIColor(red: 91/255, green: 214/255, blue: 164/255, alpha: 1), droite: true, mono: true)
             }
             zones.append(Zone(id: "play:\(v.id)", rect: CGRect(x: 40, y: y, width: 1050, height: hl)))
@@ -243,30 +259,41 @@ final class Panel {
             txt(String(format: "X %+.2f   Y %+.2f   Z %+.2f  m", s.posX, s.posY, s.posZ), 66, 486, 30, .white, mono: true)
         }
         bouton(ctx, "6dof", 880, 448, 240, 52, s.mode6dof ? "6DOF : OUI" : "6DOF : NON", actif: s.mode6dof, taille: 20)
+
+        // MAINS : ce que voit la camera, le geste en cours, la vitesse de detection
+        txt("MAINS (PINCER = CLIC, PINCEE LONGUE PAUME VERS SOI = MENU)  " + s.cadenceMains, 44, 556, 15,
+            UIColor(white: 1, alpha: 0.5), mono: true)
+        txt(s.etatMains, 44, 594, 20, s.mainVue ? vert : orange, gras: true)
+        bouton(ctx, "mains", 880, 560, 240, 50, s.mains ? "MAINS : OUI" : "MAINS : NON", actif: s.mains, taille: 20)
     }
 
     private func reglages(_ ctx: CGContext) {
         let lignes: [(String, String, String)] = [
+            ("ECART DES LENTILLES", String(format: "%.0f mm", s.ecartLentilles), "lentilles"),
+            ("TAILLE DU PASSTHROUGH", s.zoomPt <= 1.001 ? "REELLE" : String(format: "x%.1f", s.zoomPt), "zoomPt"),
             ("ECART PUPILLAIRE", String(format: "%.0f mm", s.ipd), "ipd"),
             ("CHAMP DE VISION", String(format: "%.0f deg", s.fov), "fov"),
             ("DISTORSION", String(format: "%.2f", s.k1), "k1"),
             ("DISTANCE DU MENU", String(format: "%.2f m", s.menuDist), "menuDist"),
             ("TAILLE DU MENU", String(format: "%.0f deg", s.menuAngle), "menuAngle"),
-            ("SENSIBILITE DU REGARD", String(format: "%.1fx", s.sensGaze), "sensGaze"),
             ("LISSAGE", String(format: "%.0f %%", s.smooth * 100), "smooth"),
+            ("LUMINOSITE", String(format: "%.0f %%", s.luminosite * 100), "lum"),
         ]
-        var y: CGFloat = 112
+        // 9 lignes + FORMAT : pas de 48 pour tout faire tenir au-dessus de la barre du bas
+        var y: CGFloat = 108
         for (label, valeur, cle) in lignes {
-            txt(label, 60, y + 32, 22, .white)
-            txt(valeur, 740, y + 32, 22, UIColor(red: 63/255, green: 199/255, blue: 238/255, alpha: 1), droite: true, mono: true)
-            bouton(ctx, "set:\(cle):-", 800, y, 76, 48, "-", taille: 26)
-            bouton(ctx, "set:\(cle):+", 888, y, 76, 48, "+", taille: 26)
-            y += 56
+            txt(label, 60, y + 30, 21, .white)
+            txt(valeur, 740, y + 30, 21, UIColor(red: 63/255, green: 199/255, blue: 238/255, alpha: 1), droite: true, mono: true)
+            bouton(ctx, "set:\(cle):-", 800, y, 76, 42, "-", taille: 24)
+            bouton(ctx, "set:\(cle):+", 888, y, 76, 42, "+", taille: 24)
+            y += 48
         }
-        txt("FORMAT", 60, y + 32, 22, .white)
+        txt("FORMAT", 60, y + 30, 21, .white)
         let noms = ["COTE-A-COTE", "HAUT-BAS", "IMAGE UNIQUE"]
-        bouton(ctx, "fmt", 300, y, 240, 48, noms[s.format], actif: true, taille: 18)
-        bouton(ctx, "yeux", 560, y, 240, 48, s.yeuxInverses ? "YEUX INVERSES" : "YEUX NORMAUX", actif: s.yeuxInverses, taille: 18)
+        bouton(ctx, "fmt", 300, y, 240, 42, noms[s.format], actif: true, taille: 17)
+        bouton(ctx, "yeux", 556, y, 240, 42, s.yeuxInverses ? "YEUX INVERSES" : "YEUX NORMAUX", actif: s.yeuxInverses, taille: 17)
+        // fond de l'accueil : le monde reel (camera) ou la pluie de code
+        bouton(ctx, "fond", 812, y, 290, 42, s.passthrough ? "FOND : CAMERA" : "FOND : CODE", actif: s.passthrough, taille: 17)
     }
 
     // ---------- actions ----------
@@ -293,15 +320,21 @@ final class Panel {
         case id.hasPrefix("play:"):
             let vid = String(id.dropFirst(5))
             if let v = lib.first(where: { $0.id == vid }) {
-                v.lectures += 1
-                if v.url.isEmpty {
-                    s.info = "aucun fichier pour cette entree"; s.infoT = 3.5
+                if v.estScene {
+                    SceneBus.shared.action(v)       // telecharger, ou ouvrir si deja la
                 } else {
-                    onJouer?(v)
+                    v.lectures += 1
+                    if v.url.isEmpty {
+                        s.info = "aucun fichier pour cette entree"; s.infoT = 3.5
+                    } else {
+                        onJouer?(v)
+                    }
                 }
             }
         case id == "stop":
-            VideoBus.shared.demandeStop = true; s.info = ""
+            VideoBus.shared.demandeStop = true; SceneBus.shared.demandeFermeture = true; s.info = ""
+        case id == "mains": s.mains.toggle()
+        case id == "fond": s.passthrough.toggle()
         case id == "recharger":
             onRecharger?(); s.info = "chargement du catalogue..."; s.infoT = 4
         case id == "fmt": s.format = (s.format + 1) % 3; VideoBus.shared.formatVideo = -1
@@ -318,10 +351,13 @@ final class Panel {
             case "k1": s.k1 = min(max(s.k1 + (plus ? 0.02 : -0.02), 0), 0.6)
             case "menuDist": s.menuDist = min(max(s.menuDist + (plus ? 0.05 : -0.05), 0.8), 3)
             case "menuAngle": s.menuAngle = min(max(s.menuAngle + (plus ? 2 : -2), 40), 96)
-            case "sensGaze": s.sensGaze = min(max(s.sensGaze + (plus ? 0.2 : -0.2), 1), 4)
             case "smooth": s.smooth = min(max(s.smooth + (plus ? 0.05 : -0.05), 0), 0.9)
+            case "lentilles": s.ecartLentilles = min(max(s.ecartLentilles + (plus ? 1 : -1), 50), 80)
+            case "zoomPt": s.zoomPt = (min(max(s.zoomPt + (plus ? 0.1 : -0.1), 1), 2) * 10).rounded() / 10
+            case "lum": s.luminosite = (min(max(s.luminosite + (plus ? 0.1 : -0.1), 0.1), 1) * 10).rounded() / 10
             default: break
             }
+            s.sauver()
         default: break
         }
         draw()

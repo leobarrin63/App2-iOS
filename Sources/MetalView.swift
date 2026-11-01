@@ -1,6 +1,8 @@
 import SwiftUI
 import MetalKit
 
+/* Aucun geste a l'ecran : dans le casque, toucher l'ecran ne fait rien
+   (comme sur Android). Tout passe par la tete et les mains. */
 struct MetalView: UIViewRepresentable {
     let renderer: VRRenderer
 
@@ -13,19 +15,9 @@ struct MetalView: UIViewRepresentable {
         v.isPaused = false
         v.enableSetNeedsDisplay = false
         v.framebufferOnly = false
-
-        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.onTap))
-        v.addGestureRecognizer(tap)
+        v.isUserInteractionEnabled = false
         return v
     }
 
     func updateUIView(_ uiView: MTKView, context: Context) {}
-
-    func makeCoordinator() -> Coordinator { Coordinator(renderer: renderer) }
-
-    final class Coordinator {
-        let renderer: VRRenderer
-        init(renderer: VRRenderer) { self.renderer = renderer }
-        @objc func onTap() { renderer.tap() }
-    }
 }

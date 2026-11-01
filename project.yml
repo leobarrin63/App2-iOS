@@ -16,7 +16,7 @@ targets:
         CFBundleName: Kyoh Productions
         UILaunchScreen: {}
         UIRequiresFullScreen: true
-        NSCameraUsageDescription: La camera suit les deplacements de la tete (6DoF) - aucune image n'est enregistree ni envoyee.
+        NSCameraUsageDescription: La camera suit les deplacements de la tete (6DoF), montre la piece autour de vous et reconnait vos mains - aucune image n'est enregistree ni envoyee.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationLandscapeRight
     settings:

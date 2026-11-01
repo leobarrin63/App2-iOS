@@ -15,12 +15,17 @@ final class Video: Identifiable {
     let url: String
     let teinte: Int
     let format: Int   // -1 suit le reglage manuel, 0 sbs, 1 haut-bas, 2 mono
+    let type: String  // "video" (360, en streaming) ou "scene" (3D, telechargee)
+    let taille: Int64 // octets, annonce par le serveur
     var lectures: Int = 0
 
+    var estScene: Bool { type == "scene" }
+
     init(id: String, nom: String, duree: Int, vues: Int, ajoute: Int64,
-         url: String, teinte: Int, format: Int) {
+         url: String, teinte: Int, format: Int, type: String = "video", taille: Int64 = 0) {
         self.id = id; self.nom = nom; self.duree = duree; self.vues = vues
         self.ajoute = ajoute; self.url = url; self.teinte = teinte; self.format = format
+        self.type = type; self.taille = taille
     }
 }
 
@@ -59,7 +64,9 @@ enum Catalogue {
                 ajoute: ajoute,
                 url: v["url"] as? String ?? "",
                 teinte: v["teinte"] as? Int ?? ((i * 47) % 360),
-                format: fmt))
+                format: fmt,
+                type: v["type"] as? String ?? "video",
+                taille: (v["taille"] as? NSNumber)?.int64Value ?? 0))
         }
         return (l, apiUrl)
     }

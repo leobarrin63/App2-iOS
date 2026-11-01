@@ -2,20 +2,17 @@ import Foundation
 import ARKit
 import simd
 
-/* Suivi 6DoF par la camera arriere (ARKit world tracking) : donne la
-   rotation ET la position de la tete, comme le Quest. Dans un casque
-   type Cardboard, l'ecran regarde les yeux et la camera arriere regarde
-   devant : l'axe -Z de la camera ARKit est donc directement le regard.
+/* Suivi par la camera arriere (ARKit world tracking). Sert a trois choses :
+   - le 6DoF : rotation ET position de la tete, comme le Quest ;
+   - le passthrough : l'image camera affichee en fond ;
+   - les mains : la meme image passe dans la detection de Vision.
 
-   Repere monde ARKit (.gravity) : Y vers le haut, origine = position du
-   telephone au demarrage - le meme repere que le rendu Metal (Y haut,
-   -Z devant). La transformation de la camera est exprimee pour
-   l'orientation d'interface paysage-droite, celle a laquelle l'app est
-   verrouillee (project.yml), donc aucun remap d'axes n'est necessaire.
-
-   A VERIFIER SUR APPAREIL : comme pour HeadTracker, ce repere n'a pas
-   encore ete teste sur un vrai iPhone. Si les axes sont faux, c'est ici
-   et dans VRRenderer.poseTete() qu'il faut corriger. */
+   Dans un casque type Cardboard, l'ecran regarde les yeux et la camera
+   arriere regarde devant : l'axe -Z de la camera ARKit est directement le
+   regard. Repere monde ARKit (.gravity) : Y vers le haut, origine = position
+   du telephone au demarrage - le meme repere que le rendu Metal. La camera
+   est exprimee pour l'orientation paysage-droite, celle a laquelle l'app
+   est verrouillee (project.yml). */
 final class ArTracker {
     let session = ARSession()
     private(set) var actif = false
@@ -28,6 +25,14 @@ final class ArTracker {
         c.worldAlignment = .gravity
         c.planeDetection = []
         c.isLightEstimationEnabled = false
+        /* Image 4:3 (tout le capteur) a 60 i/s si possible : passthrough
+           plus haut, et 60 positions par seconde pour la tete. */
+        let formats = ARWorldTrackingConfiguration.supportedVideoFormats
+        if let f = formats.filter({ abs(Float($0.imageResolution.width / $0.imageResolution.height) - 4.0 / 3.0) < 0.02 })
+            .sorted(by: { ($0.framesPerSecond, $0.imageResolution.height) > ($1.framesPerSecond, $1.imageResolution.height) })
+            .first {
+            c.videoFormat = f
+        }
         session.run(c, options: [.resetTracking, .removeExistingAnchors])
         actif = true
     }
@@ -38,8 +43,11 @@ final class ArTracker {
         actif = false
     }
 
-    /* Rotation tete -> monde et position (m), ou nil si le suivi n'est pas
-       exploitable (camera masquee, permission refusee, demarrage...). */
+    var frame: ARFrame? { actif ? session.currentFrame : nil }
+
+    /* Rotation tete -> monde et position (m) de la CAMERA, ou nil si le
+       suivi n'est pas exploitable (camera masquee, permission refusee,
+       demarrage...). */
     func pose() -> (rotation: matrix_float3x3, position: SIMD3<Float>, etat: String)? {
         guard actif, let frame = session.currentFrame else { return nil }
         let cam = frame.camera
