@@ -259,13 +259,13 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         let quad: [Float] = [-1, -1, 1, -1, -1, 1, 1, 1]
         quadBuf = device.makeBuffer(bytes: quad, length: quad.count * 4)
 
-        // V invers (le haut/bas du menu est bon) ; U invers aussi : sans ca le
-        // menu apparaissait en miroir gauche/droite.
+        // textures du menu et du curseur : ligne 0 = haut de l'image (convention
+        // Metal), donc v = 0 en haut du quad ; u = 0 a gauche
         let plan: [Float] = [
-            -0.5, -0.5, 0, 1, 0,
-             0.5, -0.5, 0, 0, 0,
-            -0.5,  0.5, 0, 1, 1,
-             0.5,  0.5, 0, 0, 1,
+            -0.5, -0.5, 0, 0, 1,
+             0.5, -0.5, 0, 1, 1,
+            -0.5,  0.5, 0, 0, 0,
+             0.5,  0.5, 0, 1, 0,
         ]
         planBuf = device.makeBuffer(bytes: plan, length: plan.count * 4)
     }
@@ -331,17 +331,7 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         let ww = ow * Q.w - oy * Q.y
         M = matFromQ(x, y, z, ww)
 
-        // correction ciblee du lacet du capteur (voir l'historique : sens inverse)
-        let yawBrut = atan2(M.columns.2.x, M.columns.2.z)
-        let cy = cos(-2 * yawBrut), sy = sin(-2 * yawBrut)
-        let correctionLacet = matrix_float3x3(columns: (
-            SIMD3(cy, 0, -sy),
-            SIMD3(0, 1, 0),
-            SIMD3(sy, 0, cy)
-        ))
-        M = correctionLacet * M
-
-        poseTete(dt: dt)
+        poseTete(dt: dt)      // remplace M par la rotation d'ARKit des que la camera tourne
 
         let yaw = atan2(M.columns.2.x, M.columns.2.z)
         s.dbgYaw = yaw
@@ -705,15 +695,19 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         // la camera sert au 6DoF, aux mains et au passthrough
         if (s.mode6dof || s.mains || s.passthrough) && ArTracker.disponible { ar.start() } else { ar.stop() }
 
-        if s.mode6dof, ArTracker.disponible, let p = ar.pose() {
-            let lacetBrut = atan2(p.rotation.columns.2.x, p.rotation.columns.2.z)
+        /* Des que la camera tourne, la rotation vient d'ARKit (plus juste que
+           Core Motion, et dans le meme repere que l'image camera et les
+           mains) ; le deplacement seulement si le 6DoF est active. */
+        if ArTracker.disponible, let p = ar.pose() {
             if origineAFixer || s.demandeRecentrage {
                 // origine = milieu des yeux a cet instant : la tete demarre pile en (0, 0, 0)
-                origineLacet = lacetBrut
+                origineLacet = atan2(p.rotation.columns.2.x, p.rotation.columns.2.z)
                 originePos = p.position + p.rotation * oeilDepuisCamera
                 origineAFixer = false
                 s.demandeRecentrage = false
             }
+            // 6DoF coupe : la tete reste en (0, 0, 0), et le 6DoF repart d'ici sans saut
+            if !s.mode6dof { originePos = p.position + p.rotation * oeilDepuisCamera }
             // rotation de -origineLacet autour de Y : le regard au moment du recentrage devient -Z
             let c = cos(-origineLacet), sn = sin(-origineLacet)
             let ry = matrix_float3x3(columns: (
@@ -724,13 +718,12 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             M = ry * p.rotation
             camPos = ry * (p.position - originePos)
             tetePos = camPos + M * oeilDepuisCamera
-            s.pos6dof = true
-            s.etat6dof = p.etat
+            s.pos6dof = s.mode6dof
+            s.etat6dof = s.mode6dof ? p.etat : "6DOF DESACTIVE (ROTATION PAR LA CAMERA)"
             s.posX = tetePos.x; s.posY = tetePos.y; s.posZ = tetePos.z
         } else {
             s.pos6dof = false
-            if !s.mode6dof { s.etat6dof = "6DOF DESACTIVE (ROTATION SEULE)"; origineAFixer = true }
-            else if !ArTracker.disponible { s.etat6dof = "6DOF NON SUPPORTE SUR CET APPAREIL" }
+            if !ArTracker.disponible { s.etat6dof = "6DOF NON SUPPORTE SUR CET APPAREIL" }
             else { s.etat6dof = "6DOF : CAMERA INDISPONIBLE (ROTATION SEULE)" }
             tetePos = .zero; camPos = .zero
         }
@@ -832,8 +825,7 @@ final class VRRenderer: NSObject, MTKViewDelegate {
             data: nil, width: Panel.W, height: Panel.H, bitsPerComponent: 8, bytesPerRow: Panel.W * 4,
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         )!
-        ctx.translateBy(x: 0, y: CGFloat(Panel.H))
-        ctx.scaleBy(x: 1, y: -1)
+        // pas de retournement : l'image dessinee a l'endroit donne la ligne 0 = haut, comme Metal
         return ctx
     }()
 
@@ -873,8 +865,7 @@ final class VRRenderer: NSObject, MTKViewDelegate {
         }
 
         var trouve = -1
-        // (1 - curU) : le mapping U du quad est inverse (voir construireBuffers)
-        let px = (1 - CGFloat(s.curU)) * CGFloat(Panel.W), py = CGFloat(s.curV) * CGFloat(Panel.H)
+        let px = CGFloat(s.curU) * CGFloat(Panel.W), py = CGFloat(s.curV) * CGFloat(Panel.H)
         for (i, z) in panel.zones.enumerated() {
             if px >= z.rect.minX, px <= z.rect.maxX, py >= z.rect.minY, py <= z.rect.maxY {
                 trouve = i; break

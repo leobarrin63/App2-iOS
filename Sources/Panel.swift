@@ -72,7 +72,11 @@ final class Panel {
 
     func draw() {
         zones.removeAll()
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: Panel.W, height: Panel.H))
+        // une image a la taille de la texture (1180 x 720), pas x3 comme l'ecran : 9 fois moins de pixels a chaque redessin
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.preferredRange = .standard
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: Panel.W, height: Panel.H), format: format)
         let img = renderer.image { rc in
             let ctx = rc.cgContext
             rect(ctx, 0, 0, CGFloat(Panel.W), CGFloat(Panel.H), 24,

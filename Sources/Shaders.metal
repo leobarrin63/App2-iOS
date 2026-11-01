@@ -281,10 +281,13 @@ struct LensOut {
     float2 vT;
 };
 
+/* En Metal, la ligne 0 d'une texture est en HAUT (en OpenGL, en bas) : le
+   haut de l'image (y = +1) se relit donc en v = 0. Avec la formule
+   d'Android (v = y * 0,5 + 0,5), tout ressortait retourne haut/bas. */
 vertex LensOut vsLens(uint vid [[vertex_id]], constant float2 *pos [[buffer(0)]]) {
     LensOut o;
     o.position = float4(pos[vid], 0.0, 1.0);
-    o.vT = pos[vid] * 0.5 + 0.5;
+    o.vT = float2(pos[vid].x * 0.5 + 0.5, 0.5 - pos[vid].y * 0.5);
     return o;
 }
 

@@ -7,11 +7,8 @@ import simd
    (xArbitraryZVertical) est Z vers le haut, X/Y horizontaux arbitraires
    - similaire au repere "sans boussole" utilise cote Android (Z-up).
 
-   INCERTITUDE CONNUE : contrairement au code Android (teste et corrige
-   empiriquement), ce remap d'axes n'a jamais ete verifie sur un vrai
-   appareil. Si l'image tourne dans le mauvais sens ou sur le mauvais
-   axe une fois teste, c'est ici qu'il faut ajuster les signes/permutations
-   ci-dessous - pas une erreur de compilation a chercher ailleurs. */
+   SECOURS seulement : quand la camera tourne (cas normal), la rotation
+   vient d'ARKit. Core Motion ne sert que si la camera est refusee. */
 final class HeadTracker {
     private let mm = CMMotionManager()
     private let state = AppState.shared
@@ -41,14 +38,13 @@ final class HeadTracker {
     private func traiter(_ motion: CMDeviceMotion) {
         let q = motion.attitude.quaternion
         // repere capteur (Z-up, X/Y horizontaux) -> repere Metal (Y-up, -Z devant)
-        // bascule=-90 et paysage=+90 confirmes : le haut/bas est correct
-        // avec ce reglage. La tentative d'inverser q.z pour le lacet a ete
-        // annulee (probablement recasse le haut/bas) - retour au
-        // quaternion capteur non modifie. Le lacet gauche/droite reste
-        // invers pour l'instant, a traiter separement.
+        // bascule : Z du capteur -> Y ; paysage : ecran en paysage, encoche a
+        // gauche (droite de l'ecran = -Y du telephone, haut = +X). L'ancien
+        // +90 (avec un lacet inverse a la main) compensait l'image retournee
+        // par la passe des lentilles, corrigee depuis dans Shaders.metal.
         let qCapteur = simd_quatf(real: Float(q.w), imag: SIMD3<Float>(Float(q.x), Float(q.y), Float(q.z)))
         let bascule = simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(1, 0, 0))
-        let paysage = simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(0, 0, 1))
+        let paysage = simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(0, 0, 1))
         let qFinal = (bascule * qCapteur * paysage).normalized
 
         state.qtX = qFinal.imag.x
