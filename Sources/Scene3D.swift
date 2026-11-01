@@ -651,31 +651,36 @@ final class Scene3D {
 
     // normales lissees : somme des normales des triangles autour de chaque sommet
     private func normales(_ a: Anim) {
-        a.pos.withUnsafeBufferPointer { (p: UnsafeBufferPointer<Float>) -> Void in
-            a.tri.withUnsafeBufferPointer { (tri: UnsafeBufferPointer<UInt32>) -> Void in
-                a.nrm.withUnsafeMutableBufferPointer { (out: inout UnsafeMutableBufferPointer<Float>) -> Void in
-                    for i in 0..<out.count { out[i] = 0 }
-                    var i = 0
-                    while i + 2 < tri.count {
-                        let ia = Int(tri[i]) * 3, ib = Int(tri[i + 1]) * 3, ic = Int(tri[i + 2]) * 3
-                        if ia + 2 < p.count && ib + 2 < p.count && ic + 2 < p.count {
-                            let ux = p[ib] - p[ia], uy = p[ib + 1] - p[ia + 1], uz = p[ib + 2] - p[ia + 2]
-                            let vx = p[ic] - p[ia], vy = p[ic + 1] - p[ia + 1], vz = p[ic + 2] - p[ia + 2]
-                            let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx
-                            out[ia] += nx; out[ia + 1] += ny; out[ia + 2] += nz
-                            out[ib] += nx; out[ib + 1] += ny; out[ib + 2] += nz
-                            out[ic] += nx; out[ic + 1] += ny; out[ic + 2] += nz
-                        }
-                        i += 3
-                    }
-                    var v = 0
-                    while v + 2 < out.count {
-                        let l = 1 / max((out[v] * out[v] + out[v + 1] * out[v + 1] + out[v + 2] * out[v + 2]).squareRoot(), 1e-9)
-                        out[v] *= l; out[v + 1] *= l; out[v + 2] *= l
-                        v += 3
-                    }
-                }
-            }
+        // ecrit dans le tableau du sommet lui-meme (echange : pas de copie ni d'allocation)
+        var out: [Float] = []
+        swap(&out, &a.nrm)
+        defer { swap(&out, &a.nrm) }
+        let p: [Float] = a.pos
+        let tri: [UInt32] = a.tri
+        let np: Int = p.count
+        guard out.count == np else { return }
+        for i in 0..<np { out[i] = 0 }
+        var i = 0
+        while i + 2 < tri.count {
+            let ia = Int(tri[i]) * 3
+            let ib = Int(tri[i + 1]) * 3
+            let ic = Int(tri[i + 2]) * 3
+            i += 3
+            if ia + 2 >= np || ib + 2 >= np || ic + 2 >= np { continue }
+            let pa = SIMD3<Float>(p[ia], p[ia + 1], p[ia + 2])
+            let u: SIMD3<Float> = SIMD3<Float>(p[ib], p[ib + 1], p[ib + 2]) - pa
+            let w: SIMD3<Float> = SIMD3<Float>(p[ic], p[ic + 1], p[ic + 2]) - pa
+            let n: SIMD3<Float> = simd_cross(u, w)
+            out[ia] += n.x; out[ia + 1] += n.y; out[ia + 2] += n.z
+            out[ib] += n.x; out[ib + 1] += n.y; out[ib + 2] += n.z
+            out[ic] += n.x; out[ic + 1] += n.y; out[ic + 2] += n.z
+        }
+        var v = 0
+        while v + 2 < np {
+            let l: Float = simd_length(SIMD3<Float>(out[v], out[v + 1], out[v + 2]))
+            let k: Float = l > 1e-9 ? 1 / l : 0
+            out[v] *= k; out[v + 1] *= k; out[v + 2] *= k
+            v += 3
         }
     }
 
